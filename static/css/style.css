@@ -61,6 +61,9 @@ h2 {
     border-radius: 15px; /* Rounded corners for messages */
     line-height: 1.4;
     max-width: 80%; /* Max width of a message bubble */
+    /* Ensure child images/elements don't break out of the bubble too much */
+    overflow-wrap: break-word; /* For long text strings */
+    word-wrap: break-word; /* Older browsers */
 }
 
 .sent-message {
@@ -85,7 +88,35 @@ h2 {
     font-size: 0.85em;
     margin: 10px auto;
     padding: 5px;
+    max-width: 100%; /* System messages can be wider */
 }
+
+/* Styling for embedded images in chat messages */
+.chat-embedded-image {
+    max-width: 250px;  /* Increased slightly for better viewing */
+    max-height: 250px; /* Increased slightly */
+    width: auto;       /* Maintain aspect ratio */
+    height: auto;      /* Maintain aspect ratio */
+    display: block;    /* Or inline-block if preferred, with appropriate margins */
+    margin-top: 5px;
+    margin-bottom: 5px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;   /* Indicate it can be interacted with */
+    background-color: #f9f9f9; /* Light background for image loading phase */
+    /* Adjust margins if it's inside a .sent-message or .received-message bubble */
+    margin-left: auto; /* Center if block in a bubble, or align based on parent */
+    margin-right: auto;
+}
+
+.sent-message .chat-embedded-image {
+    /* No specific change needed if message bubble already handles alignment */
+}
+
+.received-message .chat-embedded-image {
+     /* No specific change needed if message bubble already handles alignment */
+}
+
 
 /* Input area styling */
 .input-area {
@@ -135,5 +166,9 @@ h2 {
     }
     .message {
         max-width: 90%;
+    }
+    .chat-embedded-image {
+        max-width: 100%; /* Allow images to take more width on small screens */
+        max-height: 200px; /* Adjust height accordingly */
     }
 }
