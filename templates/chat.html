@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat Room</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
+</head>
+<body>
+    <h2>Chatting in Room: <span id="room-name-display">{{ room_name }}</span> as <span id="username-display">{{ username }}</span></h2>
+
+    <div>
+        <strong>Signaling Status:</strong> <span id="signaling-status">Initializing...</span>
+    </div>
+    <div>
+        <strong>P2P Status:</strong> <span id="p2p-status">Not Connected</span>
+    </div>
+
+    <hr>
+
+    <div id="chat-area" style="height: 300px; border: 1px solid #ccc; overflow-y: scroll; margin-bottom: 10px; padding: 10px;">
+        <!-- Chat messages will appear here -->
+    </div>
+
+    <div class="input-area-container">
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Type your message...">
+            <button id="send-button">Send</button>
+        </div>
+        <div class="file-area" style="margin-top: 10px;">
+            <input type="file" id="file-input">
+            <button id="send-file-button">Send File</button>
+        </div>
+    </div>
+
+    <script>
+        const USERNAME = "{{ username }}";
+        const ROOM_NAME = "{{ room_name }}";
+        const DEBUG = {{ DEBUG_MODE | tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='js/main.js') }}" defer></script>
+</body>
+</html>
