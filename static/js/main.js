@@ -23,6 +23,7 @@ let expectingFileChunkNum = undefined; // Used by receiver for chunked files
 // File Chunking Parameters
 const CHUNK_SIZE = 64 * 1024; // 64 KB chunks
 const LARGE_FILE_THRESHOLD = 256 * 1024; // Files larger than 256 KB will be chunked
+const MAX_FILE_SIZE_FOR_HASHING = 100 * 1024 * 1024; // 100MB
 
 
 // Debug Logging Function
@@ -52,164 +53,185 @@ function generateRSAKeyPair() {
     }
 }
 
-// Helper function to display received files (images or generic download links)
-function displayReceivedFile(fileBlob, fileName, fileSize, fileType, fullFileHash, originalHashProvided, chatArea, previewId = null) { // Added previewId
+// Helper function to display received files (images, video, audio, or generic download links)
+function displayReceivedFile(fileBlob, fileName, fileSize, fileType, fullFileHash, originalHashProvided, chatArea, previewId = null) {
     log(`Displaying received file: ${fileName}, Type: ${fileType}${previewId ? ', PreviewID: ' + previewId : ''}`);
     const messageDiv = document.createElement('div');
     if (previewId) {
         messageDiv.id = previewId;
     }
-    messageDiv.classList.add('message', 'system-message'); // Or 'received-message' based on context
+    messageDiv.classList.add('message', 'system-message'); // Using system-message for file entries
 
-    let hashMatchStatus = "Unknown";
-    if (originalHashProvided) { // This implies fullFileHash is the original hash
-        calculateFileHash(fileBlob).then(receivedFileHashHex => {
-            if (receivedFileHashHex) {
-                if (receivedFileHashHex === fullFileHash) {
-                    hashMatchStatus = "OK";
-                } else {
-                    hashMatchStatus = "MISMATCH!";
-                    log(`Hash MISMATCH for ${fileName}. Expected: ${fullFileHash ? fullFileHash.substring(0,10) : 'N/A'}..., Got: ${receivedFileHashHex.substring(0,10)}...`);
-                }
-            } else {
-                hashMatchStatus = "Error calculating hash";
-            }
-            updateDisplayWithHashStatus();
-        }).catch(error => {
-            log(`Error calculating hash for display: ${error}`);
-            hashMatchStatus = "Error calculating hash";
-            updateDisplayWithHashStatus();
-        });
-    } else { // No original hash provided to compare against (e.g., local preview)
-        hashMatchStatus = "N/A (Local Preview)"; // Updated for local preview case
-        updateDisplayWithHashStatus();
-    }
-
-    function updateDisplayWithHashStatus() {
+    const performDisplay = (calculatedHashMatchStatus) => {
+        // 1. Create and append media element (img, video, audio) or nothing for generic
         if (fileType && fileType.startsWith('image/')) {
-            const imgPreviewElement = document.createElement('img'); // Renamed
-            imgPreviewElement.src = URL.createObjectURL(fileBlob);
+            const imgPreviewElement = document.createElement('img');
+            const previewBlobUrl = URL.createObjectURL(fileBlob);
+            imgPreviewElement.src = previewBlobUrl;
             imgPreviewElement.alt = fileName;
             imgPreviewElement.style.maxWidth = '100%';
-            imgPreviewElement.style.maxHeight = '200px'; // Max height for preview
+            imgPreviewElement.style.maxHeight = '200px';
             imgPreviewElement.style.display = 'block';
             imgPreviewElement.style.cursor = 'pointer';
             imgPreviewElement.title = 'Click to enlarge';
+            imgPreviewElement.originalFileBlob = fileBlob;
 
-            const previewBlobUrl = URL.createObjectURL(fileBlob); // Create URL for preview
-            imgPreviewElement.src = previewBlobUrl;
-            imgPreviewElement.originalFileBlob = fileBlob; // Store the actual blob on the element
-
-            imgPreviewElement.onload = function() { // Use function() to ensure 'this' refers to imgPreviewElement
-                URL.revokeObjectURL(this.src); // Revoke the PREVIEW's own URL after it loads
-                log(`Preview loaded, revoked URL: ${this.src}`);
+            imgPreviewElement.onload = function() {
+                URL.revokeObjectURL(this.src); // Revoke PREVIEW's own URL
+                log(`Image preview loaded, revoked URL: ${this.src}`);
             };
-            imgPreviewElement.onerror = function() { // Use function()
-                log(`Error loading preview image for ${fileName}. Attempting to revoke URL: ${this.src}`);
-                try {
-                    URL.revokeObjectURL(this.src); // Also revoke on error
-                } catch (e) {
-                    log(`Error revoking preview URL on error: ${e}`);
-                }
+            imgPreviewElement.onerror = function() {
+                log(`Error loading image preview: ${this.src}. Attempting to revoke.`);
+                try { URL.revokeObjectURL(this.src); } catch (e) { /* ignore */ }
                 this.alt = 'Preview failed to load';
             };
-
-            imgPreviewElement.onclick = function() { // 'this' is imgPreviewElement
+            imgPreviewElement.onclick = function() {
                 if (lightboxModal && lightboxImage) {
-                    // Revoke previous lightbox image URL if it exists and is a blob URL
                     if (lightboxImage.src && lightboxImage.src.startsWith('blob:')) {
-                        try {
-                            URL.revokeObjectURL(lightboxImage.src);
-                            log(`Lightbox: Revoked previous lightbox URL: ${lightboxImage.src}`);
-                        } catch (e) {
-                            log(`Lightbox: Error revoking previous lightbox URL: ${e}`);
-                        }
+                        try { URL.revokeObjectURL(lightboxImage.src); } catch (e) { /* ignore */ }
                     }
-                    lightboxImage.src = ''; // Clear src first
-
+                    lightboxImage.src = ''; // Clear
                     if (this.originalFileBlob) {
-                        lightboxImage.src = URL.createObjectURL(this.originalFileBlob); // Create NEW URL for lightbox
-                        log(`Lightbox: Set new URL for lightbox: ${lightboxImage.src}`);
-                    } else {
-                        // Fallback: try to use the preview's src. This is less reliable as it might have been revoked.
-                        lightboxImage.src = this.src;
-                        log("Lightbox: originalFileBlob not found, attempting to use preview src (this.src). This might fail if preview URL was revoked.");
-                    }
+                        lightboxImage.src = URL.createObjectURL(this.originalFileBlob); // New URL for lightbox
+                    } else { lightboxImage.src = this.src; } // Fallback
                     lightboxModal.style.display = 'flex';
-                } else {
-                    log("Lightbox elements (lightboxModal or lightboxImage) not found or not initialized.");
                 }
             };
             messageDiv.appendChild(imgPreviewElement);
 
-            const downloadLink = document.createElement('a');
-            downloadLink.href = URL.createObjectURL(fileBlob); // Create a new Object URL for download, as the previous one might be revoked
-            downloadLink.download = fileName;
-            let linkTextContent;
-            if (!originalHashProvided) { // Corresponds to "N/A (Local Preview)" for hashMatchStatus
-                linkTextContent = `Local Preview: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
-                // No explicit checksum text for local preview link
-            } else { // Received file
-                linkTextContent = `Download: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
-                // Checksum status will only be indicated by color or a separate small status icon/text if needed
-            }
-            downloadLink.textContent = linkTextContent;
+        } else if (fileType && fileType.startsWith('video/')) {
+            const videoElement = document.createElement('video');
+            const videoBlobUrl = URL.createObjectURL(fileBlob);
+            videoElement.src = videoBlobUrl;
+            videoElement.controls = true;
+            videoElement.preload = 'metadata';
+            videoElement.style.maxWidth = '300px';
+            videoElement.style.maxHeight = '200px';
+            videoElement.style.display = 'block';
+            videoElement.originalFileBlob = fileBlob;
 
-            // Style link red if hash mismatch on received files
-            if (originalHashProvided && hashMatchStatus === "MISMATCH!") {
-                downloadLink.style.color = 'red';
-                // Optionally add a small text/icon indicator for mismatch here if desired
-                const mismatchIndicator = document.createElement('span');
-                mismatchIndicator.textContent = ' (Checksum Mismatch!)';
-                mismatchIndicator.style.color = 'red';
-                downloadLink.appendChild(mismatchIndicator);
-            } else if (originalHashProvided && hashMatchStatus === "Error calculating hash") {
-                downloadLink.style.color = 'orange'; // Or some other indication of an issue
-            }
+            videoElement.onerror = function() {
+                log(`Error loading video: ${this.src}.`);
+                // Don't revoke here if using controls, browser manages it.
+                // Only revoke if replacing the element.
+                const errorText = document.createElement('p');
+                errorText.textContent = 'Error loading video preview.';
+                if (this.parentNode) this.parentNode.replaceChild(errorText, this);
+                try { URL.revokeObjectURL(videoBlobUrl); } catch(e) {/*ignore*/} // Revoke if node is replaced
+            };
+            messageDiv.appendChild(videoElement);
 
-            const linkContainer = document.createElement('div');
-            linkContainer.classList.add('file-download-container');
-            linkContainer.style.marginTop = '5px'; // Add some space between image and link
-            linkContainer.appendChild(downloadLink);
-            messageDiv.appendChild(linkContainer);
+        } else if (fileType && fileType.startsWith('audio/')) {
+            const audioElement = document.createElement('audio');
+            const audioBlobUrl = URL.createObjectURL(fileBlob);
+            audioElement.src = audioBlobUrl;
+            audioElement.controls = true;
+            audioElement.preload = 'metadata';
+            audioElement.style.display = 'block';
+            audioElement.style.marginTop = '5px';
+            audioElement.originalFileBlob = fileBlob;
 
-        } else {
-            const downloadLink = document.createElement('a');
-            downloadLink.href = URL.createObjectURL(fileBlob);
-            downloadLink.download = fileName;
-
-            const linkContainer = document.createElement('div');
-            linkContainer.classList.add('file-download-container');
-            const icon = document.createElement('span');
-            icon.textContent = '📄 '; // File icon
-            linkContainer.appendChild(icon);
-            const textNode = document.createTextNode(`Download: `);
-            linkContainer.appendChild(textNode);
-
-            let linkTextContentNonImage;
-            if (!originalHashProvided) {
-                linkTextContentNonImage = `Local Preview: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
-            } else {
-                linkTextContentNonImage = `Download: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
-            }
-            downloadLink.textContent = linkTextContentNonImage;
-
-            if (originalHashProvided && hashMatchStatus === "MISMATCH!") {
-                downloadLink.style.color = 'red';
-                const mismatchIndicator = document.createElement('span');
-                mismatchIndicator.textContent = ' (Checksum Mismatch!)';
-                mismatchIndicator.style.color = 'red';
-                downloadLink.appendChild(mismatchIndicator);
-            } else if (originalHashProvided && hashMatchStatus === "Error calculating hash") {
-                downloadLink.style.color = 'orange';
-            }
-            linkContainer.appendChild(downloadLink);
-            messageDiv.appendChild(linkContainer);
+            audioElement.onerror = function() {
+                log(`Error loading audio: ${this.src}.`);
+                const errorText = document.createElement('p');
+                errorText.textContent = 'Error loading audio preview.';
+                if (this.parentNode) this.parentNode.replaceChild(errorText, this);
+                try { URL.revokeObjectURL(audioBlobUrl); } catch(e) {/*ignore*/}
+            };
+            messageDiv.appendChild(audioElement);
         }
+
+        // 2. Create and append download link (common for all file types)
+        const linkContainer = document.createElement('div');
+        linkContainer.classList.add('file-download-container');
+
+        const isMediaPreview = fileType && (fileType.startsWith('image/') || fileType.startsWith('video/') || fileType.startsWith('audio/'));
+        if (isMediaPreview) {
+            linkContainer.style.marginTop = '5px';
+        }
+
+        const downloadLink = document.createElement('a');
+        // Always create a fresh blob URL for download link, as other URLs might be revoked.
+        downloadLink.href = URL.createObjectURL(fileBlob);
+        downloadLink.download = fileName;
+
+        let linkText;
+        if (!originalHashProvided) { // Local Preview (sender side before finalization or non-image local)
+            linkText = `Local Preview: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
+            if (!isMediaPreview) { // Generic file that is a local preview
+                linkText = `${fileName} (${(fileSize / 1024).toFixed(2)} KB)`; // Simpler text for generic local
+            }
+        } else { // Received file or sender's finalized media preview
+            linkText = `Download: ${fileName} (${(fileSize / 1024).toFixed(2)} KB)`;
+        }
+
+        downloadLink.textContent = linkText;
+
+        if (!isMediaPreview) { // Generic file, add file icon and ensure "Download: " prefix for received files
+            const icon = document.createElement('span');
+            icon.textContent = '📄 ';
+            linkContainer.appendChild(icon);
+            if (originalHashProvided && !downloadLink.textContent.startsWith("Download:")) {
+                 downloadLink.textContent = `Download: ${downloadLink.textContent}`;
+            }
+        }
+
+        // Handle checksum status display for received files
+        if (originalHashProvided) {
+            if (fullFileHash === "hash_skipped_large_file") { // fullFileHash is the one from sender's header
+                const skippedIndicator = document.createElement('span');
+                skippedIndicator.textContent = ' (Checksum: N/A - sender skipped for large file)';
+                skippedIndicator.style.fontStyle = 'italic';
+                skippedIndicator.style.fontSize = '0.9em';
+                downloadLink.appendChild(skippedIndicator);
+            } else if (calculatedHashMatchStatus === "MISMATCH!") {
+                downloadLink.style.color = 'red';
+                const mismatchIndicator = document.createElement('span');
+                mismatchIndicator.textContent = ' (Checksum Mismatch!)';
+                mismatchIndicator.style.color = 'red';
+                downloadLink.appendChild(mismatchIndicator);
+            } else if (calculatedHashMatchStatus === "Error calculating hash") {
+                downloadLink.style.color = 'orange';
+                const errorIndicator = document.createElement('span');
+                errorIndicator.textContent = ' (Hash Check Error)';
+                errorIndicator.style.color = 'orange';
+                downloadLink.appendChild(errorIndicator);
+            }
+            // If "OK" or "N/A (Local Preview)", no extra indicator is added.
+        }
+
+        linkContainer.appendChild(downloadLink);
+        messageDiv.appendChild(linkContainer);
 
         chatArea.appendChild(messageDiv);
         chatArea.scrollTop = chatArea.scrollHeight;
-        log(`File display created for ${fileName}. Checksum: ${hashMatchStatus}`);
+        log(`File display created for ${fileName}. Checksum status: ${calculatedHashMatchStatus}`);
+    };
+
+    // Asynchronous hash calculation logic, then call performDisplay
+    if (originalHashProvided && fullFileHash !== "hash_skipped_large_file") {
+        // Only calculate hash on receiver if sender didn't skip it
+        calculateFileHash(fileBlob).then(receivedFileHashHex => {
+            let status = "Error calculating hash"; // Default status
+            if (receivedFileHashHex) {
+                if (receivedFileHashHex === fullFileHash) {
+                    status = "OK";
+                } else {
+                    status = "MISMATCH!";
+                    log(`Hash MISMATCH for ${fileName}. Expected: ${fullFileHash ? fullFileHash.substring(0,10) : 'N/A'}..., Got: ${receivedFileHashHex.substring(0,10)}...`);
+                }
+            }
+            performDisplay(status);
+        }).catch(error => {
+            log(`Error calculating file hash for display: ${error}`);
+            performDisplay("Error calculating hash");
+        });
+    } else if (originalHashProvided && fullFileHash === "hash_skipped_large_file") {
+        // If sender skipped hash, receiver doesn't calculate, just notes it.
+        performDisplay("N/A (Sender skipped for large file)");
+    }
+    else { // No original hash provided (e.g., local sender preview)
+        performDisplay("N/A (Local Preview)");
     }
 }
 
@@ -233,6 +255,10 @@ async function calculateFileHash(fileOrBlob) {
     if (!fileOrBlob) {
         log("Cannot calculate hash: fileOrBlob is null or undefined.");
         return null;
+    }
+    if (fileOrBlob.size > MAX_FILE_SIZE_FOR_HASHING) {
+        log(`File size (${fileOrBlob.size} bytes) exceeds limit for hashing (${MAX_FILE_SIZE_FOR_HASHING} bytes). Skipping hash.`);
+        return "hash_skipped_large_file";
     }
     try {
         const buffer = await fileOrBlob.arrayBuffer(); 
@@ -477,16 +503,18 @@ document.addEventListener('DOMContentLoaded', () => {
         pendingFileTransfers[fileId].status = 'sending_data';
 
         const fileDataHeaderBase = {
-            fileId: fileId, fileName: file.name,
-            fileType: file.type || "application/octet-stream",
-            fullFileHash: fullFileHashHex 
+            fileId: fileId,
+            // fileName: file.name, // REMOVED - will use from file_offer_secure
+            // fileType: file.type || "application/octet-stream", // REMOVED - will use from file_offer_secure
+            fileSize: file.size, // Keep fileSize as it's crucial for verification and progress
+            fullFileHash: fullFileHashHex // This can now be "hash_skipped_large_file"
         };
+        // Note: isChunked and totalChunks are added below if it's a large file.
 
         if (file.size > LARGE_FILE_THRESHOLD) {
-            // addMessageToChat(`--- Sending large file: ${file.name} in chunks... ---`, "system"); // Removed verbosity
             fileDataHeaderBase.isChunked = true;
             fileDataHeaderBase.totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            
+            log(`Stringified file_data_header length (chunked path): ${JSON.stringify(fileDataHeaderBase).length}`);
             try {
                 const encrypt = new JSEncrypt(); encrypt.setPublicKey(peerPublicKeyPEM);
                 const encryptedHeaderPayload = encrypt.encrypt(JSON.stringify(fileDataHeaderBase));
@@ -498,20 +526,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 dataChannel.send(JSON.stringify({ type: "encrypted_control_message", subType: "file_data_header", payload: encryptedHeaderPayload }));
                 log(`Sent encrypted file_data_header for chunked file ${file.name}`);
 
-                // Update sender's preview to final state
-                const localPreviewIdChunked = 'local-preview-' + fileId;
-                const previewElementChunked = document.getElementById(localPreviewIdChunked);
-                if (previewElementChunked && transferInfo.file.type.startsWith('image/')) {
-                    const linkElement = previewElementChunked.querySelector('a');
+                // Update sender's UI: if it was a media preview, finalize it. If non-media, add new entry.
+                const localPreviewId = 'local-preview-' + fileId;
+                const previewElement = document.getElementById(localPreviewId);
+
+                if (previewElement && transferInfo.file &&
+                    (transferInfo.file.type.startsWith('image/') ||
+                     transferInfo.file.type.startsWith('video/') ||
+                     transferInfo.file.type.startsWith('audio/'))) {
+
+                    const linkElement = previewElement.querySelector('.file-download-container a');
                     if (linkElement) {
-                        linkElement.textContent = `Download: ${transferInfo.file.name} (${(transferInfo.file.size / 1024).toFixed(2)} KB)`;
-                        // Remove any potential mismatch indicators if they were there
-                        const indicators = linkElement.querySelectorAll('span');
-                        indicators.forEach(indicator => indicator.remove());
-                        linkElement.style.color = ''; // Reset color if it was changed
-                        log(`Updated sender preview (chunked) for ${fileId} to final state.`);
+                        // The transferInfo here is from pendingFileTransfers[fileId]
+                        // which should have .name and .size (as per how it's populated in sendFileButton.onclick)
+                        linkElement.textContent = `Download: ${transferInfo.name} (${(transferInfo.size / 1024).toFixed(2)} KB)`;
+
+                        // Remove any child spans (like checksum mismatch indicators, though unlikely for a local preview that's being finalized)
+                        // This is to ensure only the pure "Download: ..." text remains.
+                        let childSpan = linkElement.querySelector('span');
+                        while(childSpan) {
+                            linkElement.removeChild(childSpan);
+                            childSpan = linkElement.querySelector('span');
+                        }
+                        linkElement.style.color = ''; // Reset color
+                        log(`Updated sender preview (chunked media) for ${fileId} to final state: ${linkElement.textContent}`);
+                    } else {
+                        log(`Could not find link element in preview (chunked) for ${fileId}`);
                     }
+                } else if (!previewElement && transferInfo && transferInfo.file) {
+                    // No local preview existed (not image/video/audio), so add a new file entry for sender.
+                    log(`Adding non-media file entry to sender's chat for chunked fileId: ${fileId}`);
+                    displayReceivedFile(
+                        transferInfo.file,
+                        transferInfo.name, // Use .name from transferInfo, set at offer time
+                        transferInfo.size, // Use .size from transferInfo
+                        transferInfo.file.type || "application/octet-stream",
+                        fullFileHashHex,   // The hash calculated or "hash_skipped_large_file"
+                        true,              // originalHashProvided = true to get standard "Download:" format
+                        chatArea,
+                        null               // No previewId, this is a final entry
+                    );
                 }
+
 
                 for (let chunkNum = 0; chunkNum < fileDataHeaderBase.totalChunks; chunkNum++) {
                     if (dataChannel.readyState !== 'open') { throw new Error("Data channel closed mid-transfer"); }
@@ -541,9 +597,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 addMessageToChat(`--- Error sending ${file.name}. Transfer aborted. ---`, "system"); // Keep error
             }
         } else {
-            // addMessageToChat(`--- Sending small file: ${file.name}... ---`, "system"); // Removed verbosity
             fileDataHeaderBase.isChunked = false;
-
+            log(`Stringified file_data_header length (small file path): ${JSON.stringify(fileDataHeaderBase).length}`);
             const reader = new FileReader();
             reader.onload = (event) => {
                 const arrayBuffer = event.target.result;
@@ -558,19 +613,43 @@ document.addEventListener('DOMContentLoaded', () => {
                     dataChannel.send(JSON.stringify({ type: "encrypted_control_message", subType: "file_data_header", payload: encryptedHeaderPayload }));
                     log(`Sent encrypted file_data_header for small file ${file.name}`);
 
-                    // Update sender's preview to final state
-                    const localPreviewIdSmall = 'local-preview-' + fileId;
+                    // Update sender's UI: if it was a media preview, finalize it. If non-media, add new entry.
+                    const localPreviewIdSmall = 'local-preview-' + fileId; // Consistent variable name
                     const previewElementSmall = document.getElementById(localPreviewIdSmall);
-                    if (previewElementSmall && transferInfo.file.type.startsWith('image/')) {
-                        const linkElement = previewElementSmall.querySelector('a');
+
+                    if (previewElementSmall && transferInfo.file &&
+                        (transferInfo.file.type.startsWith('image/') ||
+                         transferInfo.file.type.startsWith('video/') ||
+                         transferInfo.file.type.startsWith('audio/'))) {
+
+                        const linkElement = previewElementSmall.querySelector('.file-download-container a');
                         if (linkElement) {
-                            linkElement.textContent = `Download: ${transferInfo.file.name} (${(transferInfo.file.size / 1024).toFixed(2)} KB)`;
-                            const indicators = linkElement.querySelectorAll('span');
-                            indicators.forEach(indicator => indicator.remove());
-                            linkElement.style.color = ''; // Reset color
-                            log(`Updated sender preview (small file) for ${fileId} to final state.`);
+                            linkElement.textContent = `Download: ${transferInfo.name} (${(transferInfo.size / 1024).toFixed(2)} KB)`;
+                            let childSpan = linkElement.querySelector('span');
+                            while(childSpan) {
+                                linkElement.removeChild(childSpan);
+                                childSpan = linkElement.querySelector('span');
+                            }
+                            linkElement.style.color = '';
+                            log(`Updated sender preview (small media) for ${fileId} to final state: ${linkElement.textContent}`);
+                        } else {
+                            log(`Could not find link element in preview (small file) for ${fileId}`);
                         }
+                    } else if (!previewElementSmall && transferInfo && transferInfo.file) {
+                        // No local preview existed (not image/video/audio), so add a new file entry for sender.
+                        log(`Adding non-media file entry to sender's chat for small fileId: ${fileId}`);
+                        displayReceivedFile(
+                            transferInfo.file,
+                            transferInfo.name,
+                            transferInfo.size,
+                            transferInfo.file.type || "application/octet-stream",
+                            fullFileHashHex,   // The hash calculated or "hash_skipped_large_file"
+                            true,              // originalHashProvided = true to get standard "Download:" format
+                            chatArea,
+                            null               // No previewId, this is a final entry
+                        );
                     }
+
 
                     if (dataChannel && dataChannel.readyState === 'open') {
                         dataChannel.send(arrayBuffer);
@@ -872,15 +951,36 @@ document.addEventListener('DOMContentLoaded', () => {
                             log(`Received file_data_header for ID: ${fileHeader.fileId}, Name: ${fileHeader.fileName}, Chunked: ${fileHeader.isChunked}`);
                             if (!incomingFileTransfers[fileHeader.fileId] || incomingFileTransfers[fileHeader.fileId].status !== 'offered') {
                                 log(`Warn: file_data_header for unknown fileId: ${fileHeader.fileId} or status not 'offered'. Current status: ${incomingFileTransfers[fileHeader.fileId] ? incomingFileTransfers[fileHeader.fileId].status : 'N/A'}`);
-                                if (!incomingFileTransfers[fileHeader.fileId]) incomingFileTransfers[fileHeader.fileId] = {chunks: [], receivedSize:0, fileSize:0}; 
+                                if (!incomingFileTransfers[fileHeader.fileId]) {
+                                     log(`Warn: file_data_header for fileId '${fileHeader.fileId}' but no existing transfer info from offer. Creating minimal.`);
+                                     incomingFileTransfers[fileHeader.fileId] = {
+                                        fileId: fileHeader.fileId,
+                                        chunks: [],
+                                        receivedSize:0,
+                                        // fileName, fileType, fileSize will be missing if offer wasn't processed.
+                                        // This state might lead to issues later, but is better than crashing here.
+                                     };
+                                }
                             }
                             const transfer = incomingFileTransfers[fileHeader.fileId];
-                            transfer.fileName = fileHeader.fileName; 
-                            transfer.fileType = fileHeader.fileType;
+                            // transfer.fileName = fileHeader.fileName; // REMOVED - already set from file_offer_secure
+                            // transfer.fileType = fileHeader.fileType; // REMOVED - already set from file_offer_secure
                             transfer.isChunked = fileHeader.isChunked;
                             transfer.fullFileHash = fileHeader.fullFileHash; 
-                            if(!transfer.fileSize && fileHeader.fileSizeFromOffer) transfer.fileSize = fileHeader.fileSizeFromOffer;
-                            else if (!transfer.fileSize && fileHeader.fileSize) transfer.fileSize = fileHeader.fileSize;
+
+                            // Ensure fileSize is set. It should be in transfer from the offer.
+                            // If fileHeader contains fileSize (it does as per current sender logic), it can act as a confirmation or override.
+                            // The critical part is that `transfer.fileSize` must be set before this header is processed ideally.
+                            if (fileHeader.fileSize) { // Sender is including fileSize in header.
+                                if (transfer.fileSize && transfer.fileSize !== fileHeader.fileSize) {
+                                    log(`Warn: fileSize in header (${fileHeader.fileSize}) differs from offer (${transfer.fileSize}). Using header's.`);
+                                }
+                                transfer.fileSize = fileHeader.fileSize;
+                            } else if (!transfer.fileSize) {
+                                log(`Error: fileSize not available in file_data_header nor from original offer for ${fileHeader.fileId}. Transfer may fail.`);
+                                // Set to a default or handle error, though current sender includes it.
+                                transfer.fileSize = 0; // Fallback to prevent crashes, but this is problematic.
+                            }
 
 
                             if (fileHeader.isChunked) {
@@ -1014,9 +1114,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 size: selectedFile.size 
             };
 
-            // Display local preview for images
-            if (selectedFile && selectedFile.type.startsWith('image/')) {
-                log(`Displaying local preview for image: ${selectedFile.name}`);
+            // Display local preview for images, video, and audio
+            if (selectedFile && (selectedFile.type.startsWith('image/') || selectedFile.type.startsWith('video/') || selectedFile.type.startsWith('audio/'))) {
+                log(`Displaying local preview for media file: ${selectedFile.name}, Type: ${selectedFile.type}`);
                 // Ensure chatArea is defined and accessible here. It's typically defined in the outer scope.
                 if (typeof chatArea !== 'undefined') {
                     displayReceivedFile(
