@@ -25,6 +25,13 @@ const CHUNK_SIZE = 64 * 1024; // 64 KB chunks
 const LARGE_FILE_THRESHOLD = 256 * 1024; // Files larger than 256 KB will be chunked
 const MAX_FILE_SIZE_FOR_HASHING = 100 * 1024 * 1024; // 100MB
 
+// Voice Call Variables
+let localAudioStream = null;
+let remoteAudioElement = null;
+let callState = 'idle'; // idle, calling, offer_sent, ringing, active
+let incomingCallOfferDetails = null; // { offer: RTCSessionDescription, peerUsername: string }
+let currentCallId = null; // To track a specific call instance if needed
+
 
 // Debug Logging Function
 function log(message) {
@@ -235,6 +242,28 @@ function displayReceivedFile(fileBlob, fileName, fileSize, fileType, fullFileHas
     }
 }
 
+// Function to get local audio stream
+async function getLocalAudioStream(deviceId = null) {
+    log("Attempting to get local audio stream...");
+    if (localAudioStream) {
+        log("Stopping existing local audio stream tracks.");
+        localAudioStream.getTracks().forEach(track => track.stop());
+        localAudioStream = null;
+    }
+    try {
+        const constraints = deviceId ? { audio: { deviceId: { exact: deviceId } }, video: false } : { audio: true, video: false };
+        localAudioStream = await navigator.mediaDevices.getUserMedia(constraints);
+        log("Local audio stream acquired.");
+        // Add message to chat? Might be too verbose here, better to do it when call starts.
+        return localAudioStream;
+    } catch (error) {
+        log(`Error getting local audio stream: ${error}`);
+        console.error("getUserMedia error:", error);
+        addMessageToChat("--- Error accessing microphone. Please check permissions. ---", "system");
+        localAudioStream = null; // Ensure it's null on error
+        return null;
+    }
+}
 
 // Helper function to read Blob as ArrayBuffer
 function readBlobAsArrayBuffer(blob) {
@@ -324,6 +353,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Create remote audio element for voice calls
+    remoteAudioElement = document.createElement('audio');
+    remoteAudioElement.id = 'remote-audio';
+    // remoteAudioElement.controls = true; // Optional: for debugging
+    document.body.appendChild(remoteAudioElement); // Add it to the DOM so it can play
+
     const signalingStatusElement = document.getElementById('signaling-status');
     const p2pStatusElement = document.getElementById('p2p-status');
     const chatArea = document.getElementById('chat-area'); 
@@ -331,6 +366,135 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendButton = document.getElementById('send-button');
     const fileInputElement = document.getElementById('file-input');
     const sendFileButton = document.getElementById('send-file-button');
+
+    // Voice Call UI Elements
+    const callButton = document.getElementById('call-button');
+    if (callButton) { // Initial state for call button
+        callButton.disabled = true;
+    }
+    const hangupButton = document.getElementById('hangup-button');
+    const acceptCallButton = document.getElementById('accept-call-button');
+    const rejectCallButton = document.getElementById('reject-call-button');
+    const callStatus = document.getElementById('call-status');
+    const audioInputSelect = document.getElementById('audio-input-select');
+    const audioOutputSelect = document.getElementById('audio-output-select');
+    const outputVolumeSlider = document.getElementById('output-volume-slider');
+    // remoteAudioElement is already globally declared and created
+
+    // Helper function to send messages over the dataChannel (moved into DOMContentLoaded scope)
+    function sendDataChannelMessage(messageObject) {
+        if (typeof dataChannel === 'undefined') {
+            log("CRITICAL: dataChannel is undefined in sendDataChannelMessage scope! This indicates a serious scoping bug that should not happen.");
+            // It's important to prevent further execution if this state is encountered.
+            return;
+        }
+        if (dataChannel && dataChannel.readyState === 'open') {
+            try {
+                const messageString = JSON.stringify(messageObject);
+                dataChannel.send(messageString);
+                log(`Sent data channel message: ${messageObject.type}`);
+            } catch (error) {
+                log(`Error sending data channel message: ${error}. Message: ${JSON.stringify(messageObject)}`);
+                console.error("sendDataChannelMessage error:", error);
+            }
+        } else {
+            log(`Cannot send data channel message: dataChannel not ready or not open. State: ${dataChannel ? dataChannel.readyState : 'null'}`);
+            // Optionally, add a system message to chat if this is critical and unexpected.
+            // addMessageToChat("--- Error: Cannot send internal message. P2P connection issue? ---", "system");
+        }
+    }
+
+    function updateCallUI() {
+        log(`Updating Call UI. Current state: ${callState}`);
+        if (!callButton || !hangupButton || !acceptCallButton || !rejectCallButton || !callStatus) {
+            log("Call UI elements not found. Skipping UI update.");
+            return;
+        }
+
+        callButton.style.display = 'none';
+        hangupButton.style.display = 'none';
+        acceptCallButton.style.display = 'none';
+        rejectCallButton.style.display = 'none';
+
+        switch (callState) {
+            case 'idle':
+                callButton.style.display = 'inline-block';
+                // Disable call button if dataChannel is not ready
+                const isDataChannelReady = dataChannel && dataChannel.readyState === 'open';
+                callButton.disabled = !isDataChannelReady;
+                if (!isDataChannelReady) {
+                    callStatus.textContent = "Idle (P2P not ready)";
+                    if(callButton) callButton.title = "P2P connection not ready for calling.";
+                } else {
+                    callStatus.textContent = "Idle";
+                    if(callButton) callButton.title = "Call Peer";
+                }
+                // Ensure other buttons are hidden and appropriately enabled/disabled
+                if(hangupButton) hangupButton.style.display = 'none';
+                if(acceptCallButton) acceptCallButton.style.display = 'none';
+                if(rejectCallButton) rejectCallButton.style.display = 'none';
+                break;
+            case 'calling':
+                hangupButton.style.display = 'inline-block';
+                callStatus.textContent = `Calling ${PEER_USERNAME}...`;
+                break;
+            case 'offer_sent':
+                hangupButton.style.display = 'inline-block';
+                callStatus.textContent = `Offer sent to ${PEER_USERNAME}. Waiting...`;
+                break;
+            case 'ringing':
+                acceptCallButton.style.display = 'inline-block';
+                rejectCallButton.style.display = 'inline-block';
+                callStatus.textContent = `Incoming call from ${incomingCallOfferDetails ? incomingCallOfferDetails.peerUsername : 'Peer'}`;
+                break;
+            case 'active':
+                hangupButton.style.display = 'inline-block';
+                callStatus.textContent = `Call active with ${PEER_USERNAME}`;
+                break;
+            default:
+                callStatus.textContent = "Unknown";
+                 // Ensure callButton is hidden and disabled for any other state
+                if(callButton) {
+                    callButton.style.display = 'none';
+                    callButton.disabled = true;
+                }
+                break;
+        }
+    }
+
+
+    async function populateAudioDevices() {
+        log("Populating audio devices...");
+        if (!audioInputSelect || !audioOutputSelect) {
+            log("Audio select elements not found.");
+            return;
+        }
+
+        // Clear existing options (except the first default one if we want to keep it)
+        audioInputSelect.innerHTML = '<option value="">Default Input</option>';
+        audioOutputSelect.innerHTML = '<option value="">Default Output</option>';
+
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            devices.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                if (device.kind === 'audioinput') {
+                    option.text = device.label || `Microphone ${audioInputSelect.length}`;
+                    audioInputSelect.appendChild(option);
+                } else if (device.kind === 'audiooutput') {
+                    option.text = device.label || `Speaker ${audioOutputSelect.length}`;
+                    audioOutputSelect.appendChild(option);
+                }
+            });
+            log("Audio devices populated.");
+        } catch (error) {
+            log(`Error populating audio devices: ${error}`);
+            console.error("enumerateDevices error:", error);
+            addMessageToChat("--- Error listing audio devices. ---", "system");
+        }
+    }
+
 
     function addMessageToChat(messageText, messageType, timestamp) {
         if (!chatArea) return; 
@@ -420,6 +584,25 @@ document.addEventListener('DOMContentLoaded', () => {
             pc.ondatachannel = (event) => {
                 log("Data channel received."); dataChannel = event.channel;
                 setupDataChannelEvents(dataChannel);
+            };
+            pc.ontrack = (event) => {
+                log("Received remote track.");
+                if (event.track.kind === 'audio') {
+                    log("Remote track is audio.");
+                    if (remoteAudioElement.srcObject !== event.streams[0]) {
+                        remoteAudioElement.srcObject = event.streams[0];
+                        log("Assigned remote stream to remote audio element.");
+                        remoteAudioElement.play()
+                            .then(() => log("Remote audio playing."))
+                            .catch(e => {
+                                log(`Error playing remote audio: ${e}`);
+                                console.error("Remote audio play error:", e);
+                                addMessageToChat("--- Error playing incoming audio. ---", "system");
+                            });
+                    }
+                } else {
+                    log(`Received remote track of kind: ${event.track.kind}. Ignoring.`);
+                }
             };
         } catch (error) {
             log(`RTCPeerConnection init error: ${error.toString()}`); console.error("RTCPeerConnection init error:", error);
@@ -790,6 +973,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (messageInput) { messageInput.disabled = false; messageInput.focus(); }
             if (sendButton) sendButton.disabled = false;
             if (sendFileButton) sendFileButton.disabled = false;
+
+            log("Data channel open. Enabling call button if state is idle.");
+            // updateCallUI will handle the precise logic for enabling/disabling and status text
+            updateCallUI();
+
+            populateAudioDevices(); // Populate devices now that P2P is up, permissions might be granted
         };
         channel.onclose = () => {
             log("Data channel closed. Resetting peer state."); PEER_USERNAME = "Peer"; peerPublicKeyPEM = null;
@@ -801,6 +990,36 @@ document.addEventListener('DOMContentLoaded', () => {
             if (messageInput) messageInput.disabled = true;
             if (sendButton) sendButton.disabled = true;
             if (sendFileButton) sendFileButton.disabled = true;
+
+            // Cleanup call if active when data channel closes
+            if (callState !== 'idle') {
+                log(`Data channel closed during an active call (state: ${callState}). Cleaning up.`);
+                if (localAudioStream) {
+                    localAudioStream.getTracks().forEach(track => track.stop());
+                    localAudioStream = null;
+                    log("Local audio stream stopped due to data channel close.");
+                }
+                if (remoteAudioElement && remoteAudioElement.srcObject) {
+                    remoteAudioElement.srcObject.getTracks().forEach(track => track.stop());
+                    remoteAudioElement.srcObject = null;
+                    remoteAudioElement.pause();
+                    remoteAudioElement.currentTime = 0;
+                    log("Remote audio stream stopped due to data channel close.");
+                }
+                if (pc) {
+                    pc.getSenders().forEach(sender => {
+                        if (sender.track && sender.track.kind === 'audio') {
+                            try { pc.removeTrack(sender); log("Removed audio track from RTCPeerConnection due to data channel close."); }
+                            catch (e) { log(`Error removing audio track on data channel close: ${e}`); }
+                        }
+                    });
+                }
+                incomingCallOfferDetails = null;
+                currentCallId = null;
+                addMessageToChat("--- Call ended due to P2P connection loss. ---", "system");
+            }
+            callState = 'idle'; // Reset call state if P2P drops
+            updateCallUI();
         };
         channel.onmessage = async (event) => { // Made onmessage async
             if (event.data instanceof ArrayBuffer) {
@@ -1049,6 +1268,130 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!decrypted) { log("Decryption failed."); addMessageToChat("--- Message decryption failed. ---", "system"); return; } // Keep error
                     log(`Decrypted: ${decrypted}`); addMessageToChat(decrypted, "received");
                 } catch (error) { log(`Decryption error: ${error}`); console.error("Decryption Error:", error); addMessageToChat("--- Message decryption error. ---", "system"); } // Keep error
+            } else if (msg.type === "voice_call_offer") {
+                log(`Received voice_call_offer from ${PEER_USERNAME}. Offer: ${JSON.stringify(msg.offer).substring(0, 50)}...`);
+                if (callState !== 'idle') {
+                    log(`Received voice_call_offer but current callState is ${callState}. Sending busy signal.`);
+                    sendDataChannelMessage({ type: 'voice_call_reject', callId: msg.callId, reason: 'busy' });
+                    return;
+                }
+                incomingCallOfferDetails = { offer: msg.offer, peerUsername: PEER_USERNAME, callId: msg.callId };
+                callState = 'ringing';
+                currentCallId = msg.callId || `call-${Date.now()}`; // Use provided callId or generate one
+                log(`Call state changed to 'ringing'. Incoming call ID: ${currentCallId}`);
+                addMessageToChat(`--- Incoming voice call from ${PEER_USERNAME}. ---`, "system");
+                updateCallUI();
+                populateAudioDevices(); // Try to populate again, in case of late permission grant
+
+            } else if (msg.type === "voice_call_answer") {
+                log(`Received voice_call_answer. Answer: ${JSON.stringify(msg.answer).substring(0,50)}...`);
+                if (callState === 'calling' || callState === 'offer_sent') {
+                    if (pc && msg.answer) {
+                        pc.setRemoteDescription(new RTCSessionDescription(msg.answer))
+                            .then(() => {
+                                callState = 'active';
+                                currentCallId = msg.callId || currentCallId;
+                                log(`Call state changed to 'active'. Call ID: ${currentCallId}. Remote description set successfully.`);
+                                addMessageToChat(`--- Voice call with ${PEER_USERNAME} is now active. ---`, "system");
+                                updateCallUI();
+                            })
+                            .catch(error => {
+                                log(`Error setting remote description for answer: ${error}`);
+                                console.error("Set remote description (answer) error:", error);
+                                addMessageToChat("--- Error accepting call answer. ---", "system");
+                                callState = 'idle';
+                                updateCallUI();
+                            });
+                    } else {
+                        log("Cannot process voice_call_answer: pc or answer missing.");
+                        addMessageToChat("--- Error processing call answer. Incomplete data. ---", "system");
+                        callState = 'idle';
+                        updateCallUI();
+                    }
+                } else {
+                    log(`Received voice_call_answer but callState is ${callState}. Ignoring.`);
+                }
+
+            } else if (msg.type === "voice_call_reject") {
+                log(`Received voice_call_reject from ${PEER_USERNAME}. Reason: ${msg.reason || 'N/A'}`);
+                if (callState === 'calling' || callState === 'offer_sent' || (callState === 'ringing' && msg.reason === 'busy_local')) { // Handle self-initiated busy rejection
+                    callState = 'idle';
+                    currentCallId = null;
+                    incomingCallOfferDetails = null;
+                    log("Call state changed to 'idle'. Call rejected.");
+                    const rejectMessage = msg.reason === 'busy' ?
+                        `--- ${PEER_USERNAME} is busy. ---` :
+                        (msg.reason === 'busy_local' ? `--- Call attempt cancelled (busy). ---` : `--- ${PEER_USERNAME} rejected the voice call. ---`);
+                    addMessageToChat(rejectMessage, "system");
+
+                    if (localAudioStream) {
+                        localAudioStream.getTracks().forEach(track => track.stop());
+                        localAudioStream = null;
+                        log("Local audio stream stopped and nullified.");
+                        if (pc) {
+                            pc.getSenders().forEach(sender => {
+                                if (sender.track && sender.track.kind === 'audio') {
+                                    try { pc.removeTrack(sender); log("Removed audio track from RTCPeerConnection."); }
+                                    catch (e) { log(`Error removing audio track: ${e}`); }
+                                }
+                            });
+                        }
+                    }
+                    updateCallUI();
+                } else {
+                    log(`Received voice_call_reject but callState is ${callState} or no relevant reason. Ignoring.`);
+                }
+
+            } else if (msg.type === "voice_call_hangup") {
+                log(`Received voice_call_hangup from ${PEER_USERNAME}. Call ID: ${msg.callId}`);
+                if (callState === 'active' || callState === 'ringing') {
+                    const previousCallState = callState;
+                    callState = 'idle';
+                    log(`Call state changed to 'idle'. Call hung up by ${PEER_USERNAME}. Previous state: ${previousCallState}`);
+                    addMessageToChat(`--- ${PEER_USERNAME} ended the voice call. ---`, "system");
+
+                    if (localAudioStream) {
+                        localAudioStream.getTracks().forEach(track => track.stop());
+                        localAudioStream = null;
+                        log("Local audio stream stopped and nullified.");
+                    }
+                    if (remoteAudioElement && remoteAudioElement.srcObject) {
+                        remoteAudioElement.srcObject.getTracks().forEach(track => track.stop());
+                        remoteAudioElement.srcObject = null;
+                        remoteAudioElement.pause();
+                        remoteAudioElement.currentTime = 0;
+                        log("Remote audio stream tracks stopped and srcObject nullified.");
+                    }
+                    if (pc) {
+                        pc.getSenders().forEach(sender => {
+                            if (sender.track && sender.track.kind === 'audio') {
+                                try { pc.removeTrack(sender); log("Removed audio track from RTCPeerConnection."); }
+                                catch (e) { log(`Error removing audio track during hangup: ${e}`); }
+                            }
+                        });
+                    }
+                    if (previousCallState === 'ringing' && incomingCallOfferDetails) {
+                        incomingCallOfferDetails = null;
+                        log("Cleared incoming call offer details as call was hung up while ringing.");
+                    }
+                    currentCallId = null;
+                    updateCallUI();
+                } else {
+                    log(`Received voice_call_hangup but callState is ${callState}. Ignoring.`);
+                }
+            } else if (msg.type === "voice_ice_candidate") {
+                log("Received voice_ice_candidate.");
+                if (pc && msg.candidate) {
+                    pc.addIceCandidate(new RTCIceCandidate(msg.candidate))
+                        .then(() => log("Successfully added remote ICE candidate for voice call."))
+                        .catch(error => {
+                            log(`Error adding remote ICE candidate for voice call: ${error}`);
+                            console.error("Add voice ICE candidate error:", error);
+                        });
+                } else {
+                    log("Cannot add voice ICE candidate: pc or candidate missing.");
+                }
+
             } else {
                 log(`Unknown data channel msg type: ${msg.type}`);
             }
@@ -1240,6 +1583,327 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
     connectWebSocket();
+
+    // Initial UI setup
+    updateCallUI();
+    populateAudioDevices(); // Initial population of devices
+
+    // Event Listeners for Call Control Buttons
+    if (callButton) {
+        callButton.onclick = async () => {
+            if (!dataChannel || dataChannel.readyState !== 'open') {
+                log("Call button clicked, but dataChannel not open or not defined.");
+                addMessageToChat("--- P2P connection not yet fully established for calling. Please wait a moment. ---", "system");
+                if(callButton) callButton.disabled = true; // Explicitly disable again
+                return;
+            }
+            log("Call button clicked.");
+            if (callState !== 'idle') {
+                log("Call button clicked but call state is not idle. Ignoring.");
+                return;
+            }
+
+            callState = 'calling';
+            updateCallUI();
+            currentCallId = `call-${USERNAME}-${Date.now()}`; // Generate a unique call ID
+            log(`Initiating call. ID: ${currentCallId}`);
+
+            if (!await getLocalAudioStream()) {
+                log("Failed to get local audio stream for outgoing call.");
+                addMessageToChat("--- Could not start call: Microphone access failed. ---", "system");
+                callState = 'idle';
+                updateCallUI();
+                currentCallId = null;
+                return;
+            }
+
+            // Ensure PC is initialized
+            if (!pc) initializePeerConnection();
+            if (!pc) { // Still no PC after init attempt
+                log("PeerConnection not available to start call.");
+                addMessageToChat("--- Could not start call: P2P connection not ready. ---", "system");
+                callState = 'idle';
+                updateCallUI();
+                currentCallId = null;
+                return;
+            }
+
+            try {
+                // Add local audio tracks to pc
+                // Check if audio track is already added by this user
+                let audioTrackSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+                if (audioTrackSender && localAudioStream.getAudioTracks().length > 0) {
+                    log("Audio track already exists, replacing it.");
+                    await audioTrackSender.replaceTrack(localAudioStream.getAudioTracks()[0]);
+                } else if (localAudioStream.getAudioTracks().length > 0) {
+                    log("Adding new audio track.");
+                    localAudioStream.getTracks().forEach(track => pc.addTrack(track, localAudioStream));
+                } else {
+                    log("No audio track available in local stream to add.");
+                    throw new Error("No audio track available.");
+                }
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                callState = 'offer_sent';
+                updateCallUI();
+                sendDataChannelMessage({ type: 'voice_call_offer', offer: pc.localDescription, callId: currentCallId });
+                log("Voice call offer sent.");
+                populateAudioDevices(); // Repopulate, labels might be available now
+            } catch (error) {
+                log(`Error during call initiation: ${error}`);
+                console.error("Call initiation error:", error);
+                addMessageToChat(`--- Error starting call: ${error.message}. ---`, "system");
+                if (localAudioStream) {
+                    localAudioStream.getTracks().forEach(track => track.stop());
+                    localAudioStream = null;
+                }
+                callState = 'idle';
+                updateCallUI();
+                currentCallId = null;
+            }
+        };
+    }
+
+    if (hangupButton) {
+        hangupButton.onclick = () => {
+            log("Hangup button clicked.");
+            if (callState !== 'calling' && callState !== 'offer_sent' && callState !== 'active' && callState !== 'ringing') {
+                log(`Hangup button clicked but call state is ${callState}. Ignoring.`);
+                return;
+            }
+
+            sendDataChannelMessage({ type: 'voice_call_hangup', callId: currentCallId });
+            log(`Sent voice_call_hangup for callId: ${currentCallId}.`);
+
+            if (localAudioStream) {
+                localAudioStream.getTracks().forEach(track => track.stop());
+                localAudioStream = null;
+                log("Local audio stream stopped and nullified.");
+            }
+            if (remoteAudioElement && remoteAudioElement.srcObject) {
+                remoteAudioElement.srcObject.getTracks().forEach(track => track.stop());
+                remoteAudioElement.srcObject = null;
+                remoteAudioElement.pause();
+                remoteAudioElement.currentTime = 0;
+                log("Remote audio stream tracks stopped and srcObject nullified.");
+            }
+
+            if (pc) {
+                pc.getSenders().forEach(sender => {
+                    if (sender.track && sender.track.kind === 'audio') {
+                        try {
+                            pc.removeTrack(sender);
+                            log("Removed audio track from RTCPeerConnection on hangup.");
+                        } catch (e) {
+                            log(`Error removing audio track on hangup: ${e}`);
+                        }
+                    }
+                });
+                // Consider resetting PC or specific parts if needed for future calls
+                // For now, just removing tracks. If createOffer is called again, new transceivers will be made.
+            }
+
+            const previousState = callState;
+            callState = 'idle';
+            if (previousState === 'ringing') { // If user was ringing and they click "hangup" (acting as reject)
+                addMessageToChat("--- Call rejected. ---", "system");
+            } else {
+                addMessageToChat("--- Call ended. ---", "system");
+            }
+            incomingCallOfferDetails = null;
+            currentCallId = null;
+            updateCallUI();
+        };
+    }
+
+    if (acceptCallButton) {
+        acceptCallButton.onclick = async () => {
+            log("Accept call button clicked.");
+            if (callState !== 'ringing' || !incomingCallOfferDetails) {
+                log("Accept button clicked but not ringing or no offer details. State: " + callState);
+                return;
+            }
+
+            callState = 'active'; // Tentatively set to active, will revert on error
+            updateCallUI(); // Show "Connecting..." or similar
+
+            if (!await getLocalAudioStream()) {
+                log("Failed to get local audio stream for incoming call.");
+                addMessageToChat("--- Could not accept call: Microphone access failed. ---", "system");
+                sendDataChannelMessage({ type: 'voice_call_reject', callId: incomingCallOfferDetails.callId, reason: 'media_error' });
+                callState = 'idle';
+                incomingCallOfferDetails = null;
+                updateCallUI();
+                return;
+            }
+
+            if (!pc) initializePeerConnection(); // Should be there, but defensive
+            if (!pc) {
+                 log("PeerConnection not available to accept call.");
+                 addMessageToChat("--- Could not accept call: P2P connection not ready. ---", "system");
+                 sendDataChannelMessage({ type: 'voice_call_reject', callId: incomingCallOfferDetails.callId, reason: 'p2p_error' });
+                 callState = 'idle';
+                 incomingCallOfferDetails = null;
+                 updateCallUI();
+                 return;
+            }
+
+            try {
+                // Add local audio tracks
+                let audioTrackSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+                if (audioTrackSender && localAudioStream.getAudioTracks().length > 0) {
+                    log("Audio track already exists on accept, replacing it.");
+                    await audioTrackSender.replaceTrack(localAudioStream.getAudioTracks()[0]);
+                } else if (localAudioStream.getAudioTracks().length > 0) {
+                    log("Adding new audio track on accept.");
+                    localAudioStream.getTracks().forEach(track => pc.addTrack(track, localAudioStream));
+                } else {
+                     log("No audio track available in local stream to add on accept.");
+                    throw new Error("No audio track available for accept.");
+                }
+
+                await pc.setRemoteDescription(new RTCSessionDescription(incomingCallOfferDetails.offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                sendDataChannelMessage({ type: 'voice_call_answer', answer: pc.localDescription, callId: incomingCallOfferDetails.callId });
+                currentCallId = incomingCallOfferDetails.callId; // Confirm current call ID
+                log("Voice call answer sent.");
+                addMessageToChat(`--- Call with ${incomingCallOfferDetails.peerUsername} accepted and now active. ---`, "system");
+                incomingCallOfferDetails = null;
+                callState = 'active'; // Confirm state
+                updateCallUI();
+                populateAudioDevices(); // Repopulate, labels might be available now
+            } catch (error) {
+                log(`Error during call acceptance: ${error}`);
+                console.error("Call acceptance error:", error);
+                addMessageToChat(`--- Error accepting call: ${error.message}. ---`, "system");
+                sendDataChannelMessage({ type: 'voice_call_reject', callId: incomingCallOfferDetails.callId, reason: 'error_during_accept' });
+                if (localAudioStream) {
+                    localAudioStream.getTracks().forEach(track => track.stop());
+                    localAudioStream = null;
+                }
+                callState = 'idle';
+                incomingCallOfferDetails = null;
+                updateCallUI();
+            }
+        };
+    }
+
+    if (rejectCallButton) {
+        rejectCallButton.onclick = () => {
+            log("Reject call button clicked.");
+            if (callState !== 'ringing' || !incomingCallOfferDetails) {
+                log("Reject button clicked but not ringing or no offer details. State: " + callState);
+                return;
+            }
+
+            sendDataChannelMessage({ type: 'voice_call_reject', callId: incomingCallOfferDetails.callId });
+            log(`Sent voice_call_reject for callId: ${incomingCallOfferDetails.callId}.`);
+            addMessageToChat(`--- Call from ${incomingCallOfferDetails.peerUsername} rejected. ---`, "system");
+
+            callState = 'idle';
+            incomingCallOfferDetails = null;
+            currentCallId = null; // Clear currentCallId as this specific call is rejected
+            updateCallUI();
+        };
+    }
+
+    // Event Listener for Output Volume Slider
+    if (outputVolumeSlider) {
+        outputVolumeSlider.oninput = function() {
+            if (remoteAudioElement) {
+                remoteAudioElement.volume = this.value;
+                log(`Remote audio volume set to: ${this.value}`);
+            }
+        };
+    }
+
+    // Event Listener for Audio Input Select
+    if (audioInputSelect) {
+        audioInputSelect.onchange = async () => {
+            const selectedDeviceId = audioInputSelect.value;
+            log(`Audio input device changed to: ${selectedDeviceId}`);
+
+            if (!await getLocalAudioStream(selectedDeviceId)) {
+                log("Failed to switch audio input stream.");
+                addMessageToChat("--- Failed to switch microphone. Please ensure it's not in use or permissions are granted. ---", "system");
+                // Revert to default or previous selection if possible, or just log error.
+                // For now, we'll repopulate to reflect current state accurately.
+                await populateAudioDevices();
+                return;
+            }
+
+            if (callState === 'active' && pc && localAudioStream) {
+                const audioTrack = localAudioStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    const audioSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+                    if (audioSender) {
+                        log("Replacing audio track in active call.");
+                        try {
+                            await audioSender.replaceTrack(audioTrack);
+                            log("Audio track replaced successfully.");
+                            addMessageToChat("--- Microphone changed. ---", "system");
+                        } catch (error) {
+                            log(`Error replacing audio track: ${error}`);
+                            console.error("Replace track error:", error);
+                            addMessageToChat("--- Error switching microphone during call. ---", "system");
+                        }
+                    } else {
+                        log("No existing audio sender found to replace track. This shouldn't happen in an active call with audio.");
+                        // This might mean the track was never added, or was removed.
+                        // Attempt to add it if not present.
+                        log("Attempting to add new audio track mid-call.");
+                        pc.addTrack(audioTrack, localAudioStream);
+
+                    }
+                } else {
+                    log("No audio track found in the new local stream after attempting to switch device.");
+                }
+            } else {
+                log("Call not active or PC/localStream not ready. Switched input device for next call.");
+                if (localAudioStream) { // If a stream was acquired but call not active, inform user.
+                     addMessageToChat("--- Microphone selection saved for next call. ---", "system");
+                }
+            }
+            // Refresh device list as changing input might grant/change permissions affecting labels
+            await populateAudioDevices();
+        };
+    }
+
+    // Event Listener for Audio Output Select
+    if (audioOutputSelect) {
+        audioOutputSelect.onchange = async () => { // make async for consistency if permission prompts were a thing
+            const selectedDeviceId = audioOutputSelect.value;
+            log(`Audio output device changed to: ${selectedDeviceId}`);
+            if (remoteAudioElement && typeof remoteAudioElement.setSinkId === 'function') {
+                try {
+                    await remoteAudioElement.setSinkId(selectedDeviceId);
+                    log("Audio output device set successfully using setSinkId.");
+                    addMessageToChat("--- Speaker changed. ---", "system");
+                } catch (error) {
+                    log(`Error setting audio output device (setSinkId): ${error}`);
+                    console.error("setSinkId error:", error);
+                    let message = "--- Error switching speaker. ";
+                    if (error.name === 'NotAllowedError') {
+                        message += "Permission denied or feature not supported by browser for automatic switching. Try setting default speaker in system settings. ---";
+                    } else if (error.name === 'NotFoundError') {
+                        message += "Selected speaker not found. ---";
+                    } else {
+                        message += "Please try again or check browser compatibility. ---";
+                    }
+                    addMessageToChat(message, "system");
+                    // Attempt to repopulate, might clear invalid selection or update list
+                    await populateAudioDevices();
+                }
+            } else {
+                log("remoteAudioElement or setSinkId not available. Cannot change output device programmatically.");
+                addMessageToChat("--- Speaker selection may not be supported by your browser. Try system settings. ---", "system");
+            }
+        };
+    }
 });
 
 [end of static/js/main.js]
