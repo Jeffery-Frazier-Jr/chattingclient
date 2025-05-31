@@ -1241,11 +1241,3 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     connectWebSocket();
 });
-
-[end of static/js/main.js]
-
-[end of static/js/main.js]
-
-[end of static/js/main.js]
-
-[end of static/js/main.js]
