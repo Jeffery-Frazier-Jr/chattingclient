@@ -46,13 +46,29 @@ document.addEventListener('core-ready', () => {
     }
 
     // Load all plugins
-    loadPlugin('static/js/plugins/chat/chat.js', 'initChat', 'Chat');
-    loadPlugin('static/js/plugins/file_transfer/file_transfer.js', 'initFileTransfer', 'FileTransfer');
-    loadPlugin('static/js/plugins/voice_chat/voice_chat.js', 'initVoiceChat', 'VoiceChat');
+    plLog('Core-ready: About to start loading individual plugins.');
 
+    plLog('Core-ready: Attempting to initiate loading for Chat');
+    loadPlugin('static/js/plugins/chat/chat.js', 'initChat', 'Chat');
+    plLog('Core-ready: Call to loadPlugin for Chat completed.');
+
+    plLog('Core-ready: Attempting to initiate loading for FileTransfer');
+    loadPlugin('static/js/plugins/file_transfer/file_transfer.js', 'initFileTransfer', 'FileTransfer');
+    plLog('Core-ready: Call to loadPlugin for FileTransfer completed.');
+
+    plLog('Core-ready: Attempting to initiate loading for VoiceChat');
+    loadPlugin('static/js/plugins/voice_chat/voice_chat.js', 'initVoiceChat', 'VoiceChat');
+    plLog('Core-ready: Call to loadPlugin for VoiceChat completed.');
+
+    plLog('Core-ready: Attempting to initiate loading for ScreenShare');
+    loadPlugin('static/js/plugins/screen_share/screen_share.js', 'initScreenShare', 'ScreenShare');
+    plLog('Core-ready: Call to loadPlugin for ScreenShare completed.');
+
+    plLog('Core-ready: All loadPlugin calls have been made.');
     // All UI element event handlers and direct manipulations previously in main.js
     // for specific features (chat, file transfer, voice call) have been moved
     // to their respective plugin files. plugin_loader.js is now only a loader.
+    plLog('Core-ready: Event listener callback execution finished.');
 });
 
 // The old "DOMContentLoaded setup complete. Waiting for core-ready..." log is removed
