@@ -27,7 +27,7 @@
             <input type="text" id="message-input" placeholder="Type your message...">
             <button id="send-button">Send</button>
         </div>
-        <div class="file-area" style="margin-top: 10px;">
+        <div class="file-area" id="file-transfer-section" style="margin-top: 10px; display:none;">
             <input type="file" id="file-input">
             <button id="send-file-button">Send File</button>
         </div>
@@ -35,7 +35,7 @@
 
     <hr>
 
-    <div id="voice-call-controls" style="margin-top: 15px; padding: 10px; border: 1px solid #ddd;">
+    <div id="voice-call-controls" style="margin-top: 15px; padding: 10px; border: 1px solid #ddd; display:none;">
         <h3>Voice Call</h3>
         <div>
             <button id="call-button">Call Peer</button>
@@ -70,6 +70,7 @@
         const ROOM_NAME = "{{ room_name }}";
         const DEBUG = {{ DEBUG_MODE | tojson }};
     </script>
-    <script src="{{ url_for('static', filename='js/main.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/core.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/plugin_loader.js') }}" defer></script>
 </body>
 </html>
