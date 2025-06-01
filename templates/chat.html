@@ -65,6 +65,45 @@
         <!-- The <audio id="remote-audio"> element will be created and managed by main.js -->
     </div>
 
+    <!-- Screen Share Controls -->
+    <div id="screen-share-controls" class="plugin-controls-section" style="display: none;">
+        <h3>Screen Sharing</h3>
+        <button id="start-screen-share-button">Start Sharing</button>
+        <button id="stop-screen-share-button" style="display: none;">Stop Sharing</button>
+        <div class="control-group">
+            <label for="screen-resolution-select">Resolution:</label>
+            <select id="screen-resolution-select">
+                <option value="auto">Auto</option>
+                <option value="1080p">1080p</option>
+                <option value="720p">720p</option>
+                <option value="480p">480p</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="screen-framerate-select">Framerate:</label>
+            <select id="screen-framerate-select">
+                <option value="auto">Auto</option>
+                <option value="30">30 fps</option>
+                <option value="15">15 fps</option>
+                <option value="5">5 fps</option>
+            </select>
+        </div>
+        <p id="screen-share-status">Status: Idle</p>
+        Remote Screen:
+        <video id="remote-screen-video" autoplay playsinline></video>
+        <div class="control-group">
+             <label for="screen-audio-output-select">Audio Output:</label>
+             <select id="screen-audio-output-select">
+                 <option value="">Default Speaker</option>
+             </select>
+        </div>
+        <div class="control-group">
+            <label for="screen-output-volume-slider">Volume:</label>
+            <input type="range" id="screen-output-volume-slider" min="0" max="1" step="0.05" value="1">
+        </div>
+                    <button id="toggle-view-screen-share-button" style="display: none;">Mute Stream</button>
+    </div>
+
     <script>
         const USERNAME = "{{ username }}";
         const ROOM_NAME = "{{ room_name }}";
