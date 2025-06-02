@@ -75,20 +75,33 @@ function ss_updateShareUI() { /* ... (as defined before, with checks for element
 
     const isDataChannelReady = typeof dataChannel !== 'undefined' && dataChannel && dataChannel.readyState === 'open';
     const isCurrentlySending = (ss_sharingState === 'sharing');
-    const isCurrentlyReceiving = remoteScreenVideo && remoteScreenVideo.srcObject && remoteScreenVideo.srcObject.getTracks().some(t => t.readyState === 'live');
+    const isCurrentlyReceiving = remoteScreenVideo && remoteScreenVideo.srcObject && remoteScreenVideo.srcObject.getVideoTracks().some(t => t.readyState === 'live');
 
     let statusText;
-    if (isCurrentlySending && isCurrentlyReceiving) statusText = "Status: Sharing & Viewing";
-    else if (isCurrentlySending) statusText = "Status: Sharing your screen";
-    else if (isCurrentlyReceiving) statusText = `Status: Viewing ${typeof PEER_USERNAME !== 'undefined' ? PEER_USERNAME : 'Peer'}'s screen`;
-    else statusText = isDataChannelReady ? "Status: Idle" : "Status: Idle (P2P not ready)";
+    const peerName = (typeof PEER_USERNAME !== 'undefined' && PEER_USERNAME) ? PEER_USERNAME : 'Peer';
+
+    if (isCurrentlySending && isCurrentlyReceiving) {
+        statusText = `Status: Sharing your screen & Viewing ${peerName}'s screen`;
+    } else if (isCurrentlySending) {
+        statusText = "Status: Sharing your screen";
+    } else if (isCurrentlyReceiving) {
+        statusText = `Status: Viewing ${peerName}'s screen`;
+    } else { // Not sending and not receiving (ss_sharingState should be 'idle')
+        statusText = isDataChannelReady ? "Status: Idle" : "Status: Idle (P2P not ready)";
+    }
     if(screenShareStatus) screenShareStatus.textContent = statusText;
 
-    const canStartShare = isDataChannelReady && !isCurrentlySending && !ss_isNegotiating && (ss_peerConnection && (ss_peerConnection.signalingState === 'stable' || ss_peerConnection.signalingState === 'have-nothing'));
     if(startScreenShareButton) {
         startScreenShareButton.style.display = isCurrentlySending ? 'none' : 'inline-block';
+        
+        const canStartShare = isDataChannelReady && 
+                              !isCurrentlySending && 
+                              !ss_isNegotiating && 
+                              (ss_peerConnection && (ss_peerConnection.signalingState === 'stable' || ss_peerConnection.signalingState === 'have-nothing'));
+        
         startScreenShareButton.disabled = !canStartShare;
-        startScreenShareButton.title = canStartShare ? "Start Sharing Screen" : (isCurrentlySending ? "Already sharing" : "System busy or P2P not ready.");
+        startScreenShareButton.title = canStartShare ? "Start Sharing Screen" : 
+                                       (isCurrentlySending ? "You are already sharing your screen" : "System busy or P2P not ready.");
     }
     if(stopScreenShareButton) stopScreenShareButton.style.display = isCurrentlySending ? 'inline-block' : 'none';
     
@@ -96,7 +109,7 @@ function ss_updateShareUI() { /* ... (as defined before, with checks for element
     if(screenFramerateSelect) screenFramerateSelect.disabled = isCurrentlySending || ss_isNegotiating;
 
     if (toggleViewScreenShareButton) {
-        if (isCurrentlyReceiving) {
+        if (isCurrentlyReceiving) { 
             toggleViewScreenShareButton.style.display = 'inline-block';
             toggleViewScreenShareButton.textContent = remoteScreenVideo.muted ? 'Unmute Stream' : 'Mute Stream';
         } else {
@@ -147,78 +160,118 @@ function setupPeerConnectionEventHandlers() {
         };
         ss_log(`pc.onconnectionstatechange handler set. Current state: ${pc.connectionState}`);
 
-        pc.ontrack = (event) => {
-            ss_log(`pc.ontrack event fired. Track kind: ${event.track.kind}, ID: ${event.track.id}, Stream IDs: ${event.streams.map(s => s.id).join(', ')}`);
-            const track = event.track;
-            if (!remoteScreenVideo) {
-                ss_log("remoteScreenVideo element not found. Cannot attach track.", "error");
-                return;
-            }
+        // pc.ontrack = (event) => {
+        //     ss_log(`pc.ontrack event fired. Track kind: ${event.track.kind}, ID: ${event.track.id}, Stream IDs: ${event.streams.map(s => s.id).join(', ')}`);
+        //     const track = event.track;
+        //     if (!remoteScreenVideo) {
+        //         ss_log("remoteScreenVideo element not found. Cannot attach track.", "error");
+        //         return;
+        //     }
 
-            let isScreenShareTrack = false;
-            if (ss_transceivers.video && ss_transceivers.video.receiver && ss_transceivers.video.receiver.track === track) {
-                isScreenShareTrack = true; ss_log("Incoming video track matches managed screen share video transceiver.");
-            } else if (ss_transceivers.audio && ss_transceivers.audio.receiver && ss_transceivers.audio.receiver.track === track) {
-                isScreenShareTrack = true; ss_log("Incoming audio track matches managed screen share audio transceiver.");
-            } else {
-                 if (track.kind === 'video' && (!remoteScreenVideo.srcObject || remoteScreenVideo.srcObject.getVideoTracks().length === 0)) {
-                     isScreenShareTrack = true; ss_log(`Heuristic: Attaching video track ${track.id} as first video for remoteScreenVideo.`);
-                 } else if (track.kind === 'audio' && remoteScreenVideo.srcObject && remoteScreenVideo.srcObject.getVideoTracks().length > 0 && remoteScreenVideo.srcObject.getAudioTracks().length === 0) {
-                     isScreenShareTrack = true; ss_log(`Heuristic: Attaching audio track ${track.id} to remoteScreenVideo with existing video.`);
-                 } else {
-                     ss_log(`Track ${track.id} (kind: ${track.kind}) not matched by specific transceivers or simple heuristics for screen share.`, "info");
-                 }
-            }
+        //     let isScreenShareTrack = false;
+        //     if (track.kind === 'video') {
+        //         if (!remoteScreenVideo.srcObject || remoteScreenVideo.srcObject.getVideoTracks().length === 0) {
+        //             isScreenShareTrack = true;
+        //             ss_log(`Heuristic: Attaching video track ${track.id} as first video for remoteScreenVideo.`);
+        //             if (!ss_transceivers.video || !ss_transceivers.video.receiver) {
+        //                  ss_log("Video transceiver not found or receiver missing, cannot definitively link for screen share management beyond heuristic.", "warn");
+        //             } else {
+        //                  ss_log("Associating incoming video track with existing video transceiver for management.");
+        //             }
+        //         } else if (ss_transceivers.video && ss_transceivers.video.receiver && ss_transceivers.video.receiver.track === track) {
+        //             isScreenShareTrack = true; 
+        //             ss_log("Incoming video track matches managed screen share video transceiver's existing track. (Unexpected for restart if cleanup was perfect)");
+        //         } else {
+        //              ss_log(`Additional video track ${track.id} received but remoteScreenVideo already has video. Not treating as primary screen share.`, "info");
+        //         }
+        //     } else if (track.kind === 'audio') {
+        //         if (remoteScreenVideo.srcObject && remoteScreenVideo.srcObject.getVideoTracks().length > 0 && remoteScreenVideo.srcObject.getAudioTracks().length === 0) {
+        //             isScreenShareTrack = true;
+        //             ss_log(`Heuristic: Attaching audio track ${track.id} to remoteScreenVideo with existing video.`);
+        //             if (!ss_transceivers.audio || !ss_transceivers.audio.receiver) {
+        //                 ss_log("Audio transceiver not found or receiver missing, cannot definitively link for screen share management beyond heuristic.", "warn");
+        //             } else {
+        //                  ss_log("Associating incoming audio track with existing audio transceiver for management.");
+        //             }
+        //         } else if (ss_transceivers.audio && ss_transceivers.audio.receiver && ss_transceivers.audio.receiver.track === track) {
+        //             isScreenShareTrack = true;
+        //             ss_log("Incoming audio track matches managed screen share audio transceiver's existing track. (Unexpected for restart if cleanup was perfect)");
+        //         } else {
+        //             ss_log(`Additional audio track ${track.id} received but not fitting screen share audio heuristics.`, "info");
+        //         }
+        //     } else {
+        //         ss_log(`Track ${track.id} (kind: ${track.kind}) not video or audio. Ignoring for screen share.`, "info");
+        //     }
 
-            if (isScreenShareTrack) {
-                ss_log(`Attaching screen share track (kind: ${track.kind}, ID: ${track.id}) to remoteScreenVideo.`);
-                if (!remoteScreenVideo.srcObject) {
-                    remoteScreenVideo.srcObject = new MediaStream();
-                    ss_log("Created new MediaStream for remoteScreenVideo.srcObject");
-                }
-                try {
-                    if (!remoteScreenVideo.srcObject.getTrackById(track.id)) { // Avoid duplicates
-                        remoteScreenVideo.srcObject.addTrack(track);
-                        ss_log(`Successfully added track ${track.id}. Total tracks: ${remoteScreenVideo.srcObject.getTracks().length}`);
-                    } else {
-                        ss_log(`Track ${track.id} already present in remoteScreenVideo. Not re-adding.`, "info");
-                    }
-                } catch (addTrackError) {
-                    ss_log(`Error adding track ${track.id} to remoteScreenVideo: ${addTrackError.name} - ${addTrackError.message}`, "error");
-                    return;
-                }
+        //     if (isScreenShareTrack) {
+        //         ss_log(`Attaching screen share track (kind: ${track.kind}, ID: ${track.id}) to remoteScreenVideo.`);
+        //         if (!remoteScreenVideo.srcObject) {
+        //             remoteScreenVideo.srcObject = new MediaStream();
+        //             ss_log("Created new MediaStream for remoteScreenVideo.srcObject in ontrack.");
+        //         }
+        //         try {
+        //             if (!remoteScreenVideo.srcObject.getTrackById(track.id)) { // Avoid duplicates
+        //                 remoteScreenVideo.srcObject.addTrack(track);
+        //                 ss_log(`Successfully added track ${track.id}. Total tracks: ${remoteScreenVideo.srcObject.getTracks().length}`);
+        //             } else {
+        //                 ss_log(`Track ${track.id} already present in remoteScreenVideo. Not re-adding.`, "info");
+        //             }
+        //         } catch (addTrackError) {
+        //             ss_log(`Error adding track ${track.id} to remoteScreenVideo: ${addTrackError.name} - ${addTrackError.message}`, "error");
+        //             return;
+        //         }
                 
-                remoteScreenVideo.play().catch(playError => {
-                    ss_log(`remoteScreenVideo.play() error: ${playError.name} - ${playError.message}`, "warn");
-                });
+        //         remoteScreenVideo.play().catch(playError => {
+        //             ss_log(`remoteScreenVideo.play() error: ${playError.name} - ${playError.message}`, "warn");
+        //         });
 
-                if (!ss_remoteStream || ss_remoteStream !== remoteScreenVideo.srcObject) {
-                    ss_remoteStream = remoteScreenVideo.srcObject;
-                }
+        //         if (track.kind === 'video') {
+        //             // We don't change ss_sharingState here based on incoming tracks anymore.
+        //             // ss_sharingState is for LOCAL actions. The fact that we are receiving is handled by isCurrentlyReceiving (derived in ss_updateShareUI).
+        //             ss_log(`Remote video track ${track.id} is now active. UI update will be handled by ss_updateShareUI call.`);
+        //         }
+
+        //         if (!ss_remoteStream || ss_remoteStream !== remoteScreenVideo.srcObject) {
+        //             ss_remoteStream = remoteScreenVideo.srcObject;
+        //         }
                 
-                track.onended = () => {
-                    ss_log(`Remote screen share track (kind: ${track.kind}, ID: ${track.id}) ended.`);
-                    if (remoteScreenVideo && remoteScreenVideo.srcObject) {
-                        const trackToRemove = remoteScreenVideo.srcObject.getTrackById(track.id);
-                        if (trackToRemove) {
-                            remoteScreenVideo.srcObject.removeTrack(trackToRemove);
-                            ss_log(`Removed track ${track.id} from remoteScreenVideo.srcObject.`);
-                            if (remoteScreenVideo.srcObject.getTracks().length === 0) {
-                                remoteScreenVideo.srcObject = null;
-                                ss_log("Cleared remoteScreenVideo.srcObject as no tracks are left.");
-                                if (ss_remoteStream) ss_remoteStream = null; 
-                            }
-                        }
-                    }
-                    ss_updateShareUI();
-                };
-                ss_updateShareUI();
-                ss_populateAudioOutputDevices(); 
-            } else {
-                ss_log(`Track (kind: ${track.kind}, ID: ${track.id}) not identified as screen share for remoteScreenVideo.`);
-            }
-        };
-        ss_log('pc.ontrack handler set.');
+        //         track.onended = () => {
+        //             ss_log(`Remote screen share track (kind: ${track.kind}, ID: ${track.id}) ended.`);
+        //             if (ss_transceivers.video && ss_transceivers.video.receiver && ss_transceivers.video.receiver.track === track) {
+        //                 ss_log(`Cleared plugin reference to video receiver track ${track.id} as it ended.`);
+        //                 // ss_transceivers.video.receiver.track = null; 
+        //             } else if (ss_transceivers.audio && ss_transceivers.audio.receiver && ss_transceivers.audio.receiver.track === track) {
+        //                 ss_log(`Cleared plugin reference to audio receiver track ${track.id} as it ended.`);
+        //                 // ss_transceivers.audio.receiver.track = null;
+        //             }
+        //             if (remoteScreenVideo && remoteScreenVideo.srcObject) {
+        //                 const trackToRemove = remoteScreenVideo.srcObject.getTrackById(track.id);
+        //                 if (trackToRemove) {
+        //                     remoteScreenVideo.srcObject.removeTrack(trackToRemove);
+        //                     ss_log(`Removed track ${track.id} from remoteScreenVideo.srcObject.`);
+        //                     if (remoteScreenVideo.srcObject.getTracks().length === 0) {
+        //                         remoteScreenVideo.srcObject = null;
+        //                         ss_log("Cleared remoteScreenVideo.srcObject as no tracks are left.");
+        //                         if (ss_remoteStream) ss_remoteStream = null;
+        //                         ss_log("Resetting plugin's managed transceiver references as all remote tracks ended (receiver).");
+        //                         ss_transceivers.video = null;
+        //                         ss_transceivers.audio = null;
+        //                         // ss_sharingState is not changed here based on remote tracks ending.
+        //                         // If local user was sharing, they continue to be in 'sharing' state until they stop.
+        //                         // If they were 'idle', they remain 'idle'.
+        //                     }
+        //                 }
+        //             }
+        //             ss_updateShareUI();
+        //         };
+        //         ss_updateShareUI();
+        //         ss_populateAudioOutputDevices(); 
+        //     } else {
+        //         ss_log(`Track (kind: ${track.kind}, ID: ${track.id}) not identified as screen share for remoteScreenVideo.`);
+        //     }
+        // };
+        // ss_log('pc.ontrack handler set.'); // Also comment this log if the handler is removed.
+        ss_log('pc.ontrack handler in ScreenSharePlugin is disabled. Plugin will rely on core for track dispatch via custom events (TODO).');
 
     } else {
         ss_log('setupPeerConnectionEventHandlers: pc object not available. Cannot set handlers.', 'warn');
@@ -228,7 +281,7 @@ function setupPeerConnectionEventHandlers() {
 
 function initScreenShare() {
     ss_log('initScreenShare() called.');
-    ss_peerConnection = pc; // Use the global pc from core.js
+    // ss_peerConnection = pc; // Use the global pc from core.js - This will be set in datachannel-ready
 
     startScreenShareButton = document.getElementById('start-screen-share-button');
     // ... (rest of element fetching)
@@ -358,23 +411,28 @@ function initScreenShare() {
             if (ss_transceivers.video && ss_transceivers.video.sender.track) await ss_transceivers.video.sender.replaceTrack(null);
             if (ss_transceivers.audio && ss_transceivers.audio.sender.track) await ss_transceivers.audio.sender.replaceTrack(null);
         } catch (e) { ss_log(`Error nullifying tracks: ${e.name}`, "error", e); }
-        ss_sharingState = 'idle'; ss_addMessageToChat("--- Screen sharing stopped locally. ---", "system"); ss_updateShareUI();
+        
+        ss_log("Resetting sender's plugin managed transceiver references.");
+        ss_transceivers.video = null;
+        ss_transceivers.audio = null;
+        ss_sharingState = 'idle'; 
+        ss_addMessageToChat("--- Screen sharing stopped locally. ---", "system"); 
+        ss_updateShareUI();
     };}
 
     // Event Listeners
     document.addEventListener('datachannel-ready', () => {
         ss_log('Datachannel-ready event received.');
-        if (ss_peerConnection) { // ss_peerConnection is pc
+        // Assign pc to ss_peerConnection here, as pc should be initialized by now.
+        ss_peerConnection = pc; 
+
+        if (ss_peerConnection) {
             ss_log(`Inside datachannel-ready: pc object IS available. SignalingState: ${ss_peerConnection.signalingState}`);
             // Check if handlers are already set by looking for our custom flag or a specific handler
-            if (!ss_peerConnection._ss_onsignalingstatechange_set) { 
-                 ss_log('Datachannel-ready: pc handlers not set, calling setupPeerConnectionEventHandlers now.');
-                 setupPeerConnectionEventHandlers();
-            } else {
-                 ss_log('Datachannel-ready: pc event handlers seem to be already set.');
-            }
+            // setupPeerConnectionEventHandlers is idempotent due to the _ss_onsignalingstatechange_set flag
+            setupPeerConnectionEventHandlers(); 
         } else {
-            ss_log('Inside datachannel-ready: pc object is NOT available.', 'warn');
+            ss_log('Inside datachannel-ready: pc object is NOT available even after assignment attempt.', 'error');
         }
         ss_populateAudioOutputDevices(); 
         ss_updateShareUI(); 
@@ -424,6 +482,15 @@ function initScreenShare() {
                     remoteScreenVideo.srcObject.getTracks().forEach(track => track.stop()); remoteScreenVideo.srcObject = null;
                 }
                 if (ss_remoteStream) { ss_remoteStream.getTracks().forEach(track => track.stop()); ss_remoteStream = null; }
+                
+                // Explicitly nullifying conceptual track references from previous step is fine.
+                // Now, also reset the main transceiver holders for the receiver.
+                ss_log("Resetting plugin's managed transceiver references on screen_share_stop (receiver).");
+                ss_transceivers.video = null;
+                ss_transceivers.audio = null;
+                // ss_sharingState is not changed here based on remote peer stopping.
+                // If local user was sharing, they continue to be in 'sharing' state.
+                // If they were 'idle', they remain 'idle'.
                 ss_addMessageToChat(`--- Peer ${payload.username || 'User'} stopped screen sharing. ---`, "system");
                 ss_updateShareUI();
                 break;
