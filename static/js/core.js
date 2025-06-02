@@ -187,22 +187,46 @@ function initializePeerConnection() {
             setupDataChannelEvents(dataChannel);
         };
         pc.ontrack = (event) => {
-            log("Received remote track.");
-            if (event.track.kind === 'audio') {
-                log("Remote track is audio.");
-                if (remoteAudioElement && remoteAudioElement.srcObject !== event.streams[0]) {
-                    remoteAudioElement.srcObject = event.streams[0];
-                    log("Assigned remote stream to remote audio element.");
-                    remoteAudioElement.play()
-                        .then(() => log("Remote audio playing."))
-                        .catch(e => {
-                            log(`Error playing remote audio: ${e}`);
-                            console.error("Remote audio play error:", e);
-                            addMessageToChat("--- Error playing incoming audio. ---", "system");
-                        });
+            log(`Core pc.ontrack: Received remote track. Kind: ${event.track.kind}, ID: ${event.track.id}, Stream IDs: ${event.streams.map(s => s.id).join(', ')}`);
+            const track = event.track;
+            const stream = event.streams && event.streams.length > 0 ? event.streams[0] : null;
+
+            if (!stream) {
+                log("Core pc.ontrack: No stream associated with the track. Cannot process.", "warn");
+                return;
+            }
+
+            let isVideoTrackPresentInStream = false;
+            stream.getTracks().forEach(t => {
+                if (t.kind === 'video') {
+                    isVideoTrackPresentInStream = true;
                 }
+            });
+
+            if (track.kind === 'audio') {
+                if (isVideoTrackPresentInStream) {
+                    log(`Core pc.ontrack: Dispatching screen share associated audio track ${track.id} to ScreenSharePlugin.`);
+                    document.dispatchEvent(new CustomEvent('core-screenshare-audiotrack-received', { detail: { track, stream } }));
+                } else {
+                    // Assume it's voice chat audio
+                    log(`Core pc.ontrack: Handling voice chat audio track ${track.id}.`);
+                    if (remoteAudioElement) {
+                        if (!remoteAudioElement.srcObject || remoteAudioElement.srcObject !== stream) {
+                           remoteAudioElement.srcObject = stream;
+                           log("Core pc.ontrack: Assigned stream to remote audio element for voice chat.");
+                           remoteAudioElement.play().catch(e => log(`Error playing remote audio for voice chat: ${e.name} - ${e.message}`));
+                        } else {
+                           log("Core pc.ontrack: Voice chat audio track received for an already assigned stream.");
+                        }
+                    } else {
+                        log("Core pc.ontrack: remoteAudioElement not found for voice chat.", "error");
+                    }
+                }
+            } else if (track.kind === 'video') {
+                log(`Core pc.ontrack: Dispatching screen share video track ${track.id} to ScreenSharePlugin.`);
+                document.dispatchEvent(new CustomEvent('core-screenshare-videotrack-received', { detail: { track, stream } }));
             } else {
-                log(`Received remote track of kind: ${event.track.kind}. Ignoring.`);
+                log(`Core pc.ontrack: Received remote track of unhandled kind: ${track.kind}. Ignoring.`);
             }
         };
     } catch (error) {
