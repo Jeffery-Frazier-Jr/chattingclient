@@ -204,7 +204,7 @@ function initVoiceChat() {
             }
 
             if (typeof pc === 'undefined' || !pc) { // pc from core.js
-                if (typeof initializePeerConnection === 'function') initializePeerConnection();
+                if (typeof initializePeerConnection === 'function') initializePeerConnection(); 
                 if (typeof pc === 'undefined' || !pc) {
                     log("VoiceChatPlugin: PeerConnection not available.");
                     if (typeof addMessageToChat === 'function') addMessageToChat("--- Could not start call: P2P not ready. ---", "system");
@@ -224,12 +224,12 @@ function initVoiceChat() {
                 await pc.setLocalDescription(offer);
 
                 vc_callState = 'offer_sent';
-                sendDataChannelMessage({ type: 'voice_call_offer', offer: pc.localDescription, callId: vc_currentCallId });
+                sendDataChannelMessage({ type: 'voice_call_offer', offer: pc.localDescription, callId: vc_currentCallId }); 
                 log("VoiceChatPlugin: Voice call offer sent.");
             } catch (error) {
                 log(`VoiceChatPlugin: Error during call initiation: ${error}`);
                 if (typeof addMessageToChat === 'function') addMessageToChat(`--- Error starting call: ${error.message}. ---`, "system");
-                vc_cleanupCall(); vc_callState = 'idle';
+                vc_cleanupCall(); vc_callState = 'idle'; 
             }
             vc_updateCallUI(); // Update UI after state changes / potential errors
         };
@@ -239,13 +239,13 @@ function initVoiceChat() {
         vc_hangupButton.onclick = () => {
             log("VoiceChatPlugin: Hangup button clicked.");
             if (vc_callState === 'idle') { log("VoiceChatPlugin: Hangup clicked but already idle."); return; }
-
+            
             sendDataChannelMessage({ type: 'voice_call_hangup', callId: vc_currentCallId });
             log(`VoiceChatPlugin: Sent voice_call_hangup for callId: ${vc_currentCallId}.`);
-
+            
             const message = (vc_callState === 'ringing' && vc_incomingCallOfferDetails) ? `--- Call from ${vc_incomingCallOfferDetails.peerUsername} rejected by local user action (hangup). ---` : "--- Call ended by local user. ---";
             if (typeof addMessageToChat === 'function') addMessageToChat(message, "system");
-
+            
             vc_cleanupCall();
             vc_callState = 'idle';
             vc_updateCallUI();
@@ -286,22 +286,22 @@ function initVoiceChat() {
                 await pc.setLocalDescription(answer);
 
                 sendDataChannelMessage({ type: 'voice_call_answer', answer: pc.localDescription, callId: vc_incomingCallOfferDetails.callId });
-                vc_currentCallId = vc_incomingCallOfferDetails.callId;
+                vc_currentCallId = vc_incomingCallOfferDetails.callId; 
                 log("VoiceChatPlugin: Voice call answer sent.");
                 if (typeof addMessageToChat === 'function') addMessageToChat(`--- Call with ${vc_incomingCallOfferDetails.peerUsername} accepted and now active. ---`, "system");
-
-                vc_callState = 'active';
-                vc_incomingCallOfferDetails = null;
+                
+                vc_callState = 'active'; 
+                vc_incomingCallOfferDetails = null; 
             } catch (error) {
                 log(`VoiceChatPlugin: Error during call acceptance: ${error}`);
                 if (typeof addMessageToChat === 'function') addMessageToChat(`--- Error accepting call: ${error.message}. ---`, "system");
                 sendDataChannelMessage({ type: 'voice_call_reject', callId: vc_incomingCallOfferDetails.callId, reason: 'error_during_accept' });
-                vc_cleanupCall(); vc_callState = 'idle';
+                vc_cleanupCall(); vc_callState = 'idle'; 
             }
             vc_updateCallUI(); // Update UI after state changes / potential errors
         };
     }
-
+    
     if (vc_rejectCallButton) {
         vc_rejectCallButton.onclick = () => {
             log("VoiceChatPlugin: Reject call button clicked.");
@@ -311,7 +311,7 @@ function initVoiceChat() {
             sendDataChannelMessage({ type: 'voice_call_reject', callId: vc_incomingCallOfferDetails.callId, reason: 'rejected_by_user' });
             log(`VoiceChatPlugin: Sent voice_call_reject for callId: ${vc_incomingCallOfferDetails.callId}.`);
             if (typeof addMessageToChat === 'function') addMessageToChat(`--- Call from ${vc_incomingCallOfferDetails.peerUsername} rejected. ---`, "system");
-            vc_cleanupCall();
+            vc_cleanupCall(); 
             vc_callState = 'idle';
             vc_updateCallUI();
         };
@@ -334,13 +334,13 @@ function initVoiceChat() {
                     if (audioSender) {
                         try { await audioSender.replaceTrack(audioTrack); log("VoiceChatPlugin: Audio track replaced."); if (typeof addMessageToChat === 'function') addMessageToChat("--- Microphone changed. ---", "system"); }
                         catch (error) { log(`VoiceChatPlugin: Error replacing audio track: ${error}`); if (typeof addMessageToChat === 'function') addMessageToChat("--- Error switching microphone. ---", "system");}
-                    } else {
+                    } else { 
                         log("VoiceChatPlugin: No existing audio sender found, adding new track.");
-                        pc.addTrack(audioTrack, vc_localAudioStream);
+                        pc.addTrack(audioTrack, vc_localAudioStream); 
                     }
                 }
             }
-            await vc_populateAudioDevices();
+            await vc_populateAudioDevices(); 
         };
     }
 
@@ -405,11 +405,11 @@ function initVoiceChat() {
                                 vc_callState = 'idle';
                                 vc_updateCallUI();
                             });
-                    } else {
-                        log("VoiceChatPlugin: Cannot process answer: pc or answer missing.");
-                        vc_cleanupCall(); vc_callState = 'idle'; vc_updateCallUI();
+                    } else { 
+                        log("VoiceChatPlugin: Cannot process answer: pc or answer missing."); 
+                        vc_cleanupCall(); vc_callState = 'idle'; vc_updateCallUI(); 
                     }
-                } else {
+                } else { 
                     log(`VoiceChatPlugin: Received voice_call_answer in unexpected state: ${vc_callState}`);
                 }
                 break;
@@ -420,7 +420,7 @@ function initVoiceChat() {
                     vc_callState = 'idle';
                     if (typeof addMessageToChat === 'function') addMessageToChat(`--- Call rejected by ${PEER_USERNAME} (Reason: ${payload.reason || 'N/A'}). ---`, "system");
                     vc_updateCallUI();
-                } else {
+                } else { 
                      log(`VoiceChatPlugin: Received voice_call_reject in unexpected state: ${vc_callState}`);
                 }
                 break;
@@ -445,7 +445,7 @@ function initVoiceChat() {
         }
     });
     log('VoiceChatPlugin: Updated event listener to use core-message-received for voice signals.');
-
+    
     // Listen for P2P disconnection from core.js to cleanup UI and state
     // This event name 'p2pdisconnected' needs to be dispatched by core.js on data channel close or ICE failure.
     // Assuming core.js will dispatch this.
@@ -461,7 +461,7 @@ function initVoiceChat() {
 
 
     if (typeof addMessageToChat === 'function') addMessageToChat("--- Voice Chat plugin initialized. ---", "system");
-
+    
     // Make the voice call controls section visible
     const vcControlsSection = document.getElementById('voice-call-controls');
     if (vcControlsSection) {
