@@ -421,6 +421,68 @@ function initScreenShare() {
     };}
 
     // Event Listeners
+
+    // New standalone function to handle received tracks
+    function handleReceivedTrack(track) {
+        if (!track) {
+            ss_log("ScreenShare: handleReceivedTrack called with null track.", 'warn');
+            return;
+        }
+        ss_log(`ScreenShare: handleReceivedTrack processing. Kind: ${track.kind}, Track ID: ${track.id}, ReadyState: ${track.readyState}`);
+
+        if (!remoteScreenVideo) {
+            ss_log("ScreenShare: remoteScreenVideo HTML element not found. Cannot process track.", 'error');
+            return;
+        }
+
+        if (!remoteScreenVideo.srcObject) {
+            ss_log("ScreenShare: remoteScreenVideo.srcObject is null. Creating new MediaStream.");
+            remoteScreenVideo.srcObject = new MediaStream();
+        }
+
+        if (remoteScreenVideo.srcObject.getTrackById(track.id)) {
+            ss_log(`ScreenShare: Track ${track.id} (${track.kind}) already present in remoteScreenVideo.srcObject. Not re-adding.`, 'info');
+        } else {
+            try {
+                remoteScreenVideo.srcObject.addTrack(track);
+                ss_log(`ScreenShare: Successfully added ${track.kind} track ${track.id} to remoteScreenVideo.srcObject. Total tracks: ${remoteScreenVideo.srcObject.getTracks().length}`);
+            } catch (addTrackError) {
+                ss_log(`ScreenShare: Error adding ${track.kind} track ${track.id} to remoteScreenVideo.srcObject: ${addTrackError.name} - ${addTrackError.message}`, "error", addTrackError);
+                return; // Stop further processing if track can't be added
+            }
+        }
+        
+        remoteScreenVideo.play().catch(playError => {
+            ss_log(`ScreenShare: remoteScreenVideo.play() error: ${playError.name} - ${playError.message}`, "warn", playError);
+        });
+
+        if (ss_remoteStream !== remoteScreenVideo.srcObject) {
+            ss_log("ScreenShare: Updating ss_remoteStream to current remoteScreenVideo.srcObject.");
+            ss_remoteStream = remoteScreenVideo.srcObject;
+        }
+
+        track.onended = () => {
+            ss_log(`ScreenShare: Remote screen share track (kind: ${track.kind}, ID: ${track.id}) ended.`);
+            if (remoteScreenVideo && remoteScreenVideo.srcObject) {
+                const trackToRemove = remoteScreenVideo.srcObject.getTrackById(track.id);
+                if (trackToRemove) {
+                    remoteScreenVideo.srcObject.removeTrack(trackToRemove);
+                    ss_log(`ScreenShare: Removed track ${track.id} from remoteScreenVideo.srcObject.`);
+                    if (remoteScreenVideo.srcObject.getTracks().length === 0) {
+                        remoteScreenVideo.srcObject = null; 
+                        ss_log("ScreenShare: Cleared remoteScreenVideo.srcObject as no tracks are left.");
+                        if (ss_remoteStream) ss_remoteStream = null; 
+                    }
+                }
+            }
+            ss_updateShareUI(); 
+        };
+        
+        ss_log("ScreenShare: Refreshing UI and audio devices after track processing in handleReceivedTrack.");
+        ss_updateShareUI();
+        ss_populateAudioOutputDevices();
+    }
+
     document.addEventListener('datachannel-ready', () => {
         ss_log('Datachannel-ready event received.');
         // Assign pc to ss_peerConnection here, as pc should be initialized by now.
@@ -496,7 +558,29 @@ function initScreenShare() {
                 break;
         }
     });
+
     
+    // New event listeners for specific track types from core.js
+    document.addEventListener('core-screenshare-videotrack-received', (event) => {
+        if (!event.detail || !event.detail.track) {
+            ss_log("ScreenShare: 'core-screenshare-videotrack-received' event missing track detail.", 'warn');
+            return;
+        }
+        const { track } = event.detail;
+        ss_log(`ScreenShare: Received 'core-screenshare-videotrack-received' event. Track ID: ${track.id}, Kind: ${track.kind}`);
+        handleReceivedTrack(track);
+    });
+
+    document.addEventListener('core-screenshare-audiotrack-received', (event) => {
+        if (!event.detail || !event.detail.track) {
+            ss_log("ScreenShare: 'core-screenshare-audiotrack-received' event missing track detail.", 'warn');
+            return;
+        }
+        const { track } = event.detail;
+        ss_log(`ScreenShare: Received 'core-screenshare-audiotrack-received' event. Track ID: ${track.id}, Kind: ${track.kind}`);
+        handleReceivedTrack(track);
+    });
+
     ss_log("Attempting to set up PC event handlers during init.");
     setupPeerConnectionEventHandlers(); // Initial attempt to set handlers
 
