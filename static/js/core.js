@@ -8,7 +8,7 @@ let myPublicKeyPEM = null;
 let myPrivateKeyPEM = null;
 let peerPublicKeyPEM = null;
 
-const CHUNK_SIZE = 64 * 1024; // 64 KB chunks
+const CHUNK_SIZE = 1024 * 1024; // 64 KB chunks
 const LARGE_FILE_THRESHOLD = 256 * 1024; // Files larger than 256 KB will be chunked
 const MAX_FILE_SIZE_FOR_HASHING = 100 * 1024 * 1024; // 100MB
 
