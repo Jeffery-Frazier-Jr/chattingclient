@@ -206,24 +206,86 @@ async function ft_initiateFileSend(fileId) {
                  displayReceivedFile(transferInfo.file, transferInfo.name, transferInfo.size, transferInfo.file.type || "application/octet-stream", fullFileHashHex, true, ft_chatArea, null);
             }
 
+            // Start of new chunk sending logic
+            let currentChunk = 0;
+            const totalChunks = fileDataHeaderBase.totalChunks;
+            const LOW_WATER_MARK = 1024 * 1024; // Example: 1MB, adjust as needed
+            const SEND_DELAY_MS = 50; // Example: 50ms delay for setTimeout fallback
 
-            for (let chunkNum = 0; chunkNum < fileDataHeaderBase.totalChunks; chunkNum++) {
-                if (typeof dataChannel === 'undefined' || !dataChannel || dataChannel.readyState !== 'open') { throw new Error("Data channel closed mid-transfer"); }
-                const start = chunkNum * CHUNK_SIZE;
+            async function sendNextChunk() {
+                if (currentChunk >= totalChunks) {
+                    ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
+                    log(`FileTransfer Plugin: All chunks sent for ${file.name}`);
+                    // Clean up bufferedamountlow listener if it was attached
+                    if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
+                        dataChannel.onbufferedamountlow = null;
+                    }
+                    return;
+                }
+
+                if (typeof dataChannel === 'undefined' || !dataChannel || dataChannel.readyState !== 'open') {
+                    throw new Error("Data channel closed mid-transfer");
+                }
+
+                const start = currentChunk * CHUNK_SIZE;
                 const end = Math.min(start + CHUNK_SIZE, file.size);
                 const chunkBlob = file.slice(start, end);
                 const chunkArrayBuffer = await readBlobAsArrayBuffer(chunkBlob); // readBlobAsArrayBuffer from core
 
-                const chunkHeader = { fileId: fileId, chunkNum: chunkNum, chunkSize: chunkArrayBuffer.byteLength };
+                const chunkHeader = { fileId: fileId, chunkNum: currentChunk, chunkSize: chunkArrayBuffer.byteLength };
                 const encryptedChunkHeaderPayload = encrypt.encrypt(JSON.stringify(chunkHeader));
-                if (!encryptedChunkHeaderPayload) { throw new Error(`Error encrypting chunk header ${chunkNum}`); }
+                if (!encryptedChunkHeaderPayload) {
+                    throw new Error(`Error encrypting chunk header ${currentChunk}`);
+                }
 
                 sendDataChannelMessage({ type: "encrypted_control_message", subType: "file_chunk_header", payload: encryptedChunkHeaderPayload });
                 dataChannel.send(chunkArrayBuffer); // Send binary data directly via dataChannel from core
-                log(`FileTransfer Plugin: Sent chunk ${chunkNum + 1}/${fileDataHeaderBase.totalChunks} for ${file.name}`);
+                log(`FileTransfer Plugin: Sent chunk ${currentChunk + 1}/${totalChunks} for ${file.name}. Buffered amount: ${dataChannel.bufferedAmount}`);
                 ft_pendingFileTransfers[fileId].sentChunks = (ft_pendingFileTransfers[fileId].sentChunks || 0) + 1;
+                currentChunk++;
+
+                // Check if bufferedamountlow event is supported and reliable
+                // For this example, we'll assume it's supported if the property exists.
+                // Reliability would need more complex feature detection or prior knowledge.
+                if (typeof dataChannel.onbufferedamountlow !== 'undefined' && dataChannel.bufferedAmount > LOW_WATER_MARK) {
+                    log(`FileTransfer Plugin: Buffer full for ${file.name}. Waiting for bufferedamountlow. Amount: ${dataChannel.bufferedAmount}`);
+                    dataChannel.onbufferedamountlow = handleBufferedAmountLow;
+                } else if (typeof dataChannel.onbufferedamountlow === 'undefined') {
+                    // Fallback to setTimeout if onbufferedamountlow is not supported
+                    log(`FileTransfer Plugin: bufferedamountlow not supported. Using setTimeout for ${file.name}.`);
+                    setTimeout(sendNextChunk, SEND_DELAY_MS);
+                } else {
+                    // If onbufferedamountlow is supported but buffer is not full, send next chunk immediately (or with a small delay)
+                    // This path can also be a fallback if bufferedamountlow doesn't fire reliably.
+                    // For simplicity, we'll use a small delay here too, or could call sendNextChunk() directly for faster sending.
+                    // Calling directly might lead to recursion depth issues for very fast channels/small chunks if not careful.
+                    // Using requestAnimationFrame or Promise.resolve().then() could be alternatives for immediate scheduling.
+                    // log(`FileTransfer Plugin: Buffer not full, or onbufferedamountlow not reliable. Scheduling next chunk with minimal delay for ${file.name}.`);
+                    // setTimeout(sendNextChunk, 0); // Or Promise.resolve().then(sendNextChunk);
+                    // For a more robust approach, we can just proceed if buffer is low, otherwise wait.
+                    // If bufferedAmount is low enough, proceed, else set up listener or timeout.
+                    // This logic is already covered by the (dataChannel.bufferedAmount > LOW_WATER_MARK) check above.
+                    // So if we reach here, it means the buffer is NOT high, so we can send the next one.
+                    // To prevent potential stack overflow with synchronous recursive calls:
+                    Promise.resolve().then(sendNextChunk);
+                }
             }
-            ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
+
+            function handleBufferedAmountLow() {
+                log(`FileTransfer Plugin: bufferedamountlow event fired for ${file.name}. Resuming send. Buffered amount: ${dataChannel.bufferedAmount}`);
+                // It's good practice to nullify the handler after it's been called once,
+                // especially if we re-evaluate whether to use it for the next chunk.
+                // However, if we always want to rely on it when the buffer gets full,
+                // we might re-assign it. For this pattern, let's clear and re-evaluate.
+                if (dataChannel) { // Check if dataChannel still exists
+                    dataChannel.onbufferedamountlow = null;
+                }
+                sendNextChunk();
+            }
+
+            // Initiate the sending process
+            sendNextChunk();
+
         } else { // Small file
             fileDataHeaderBase.isChunked = false;
             const encryptedHeaderPayload = encrypt.encrypt(JSON.stringify(fileDataHeaderBase));
