@@ -209,14 +209,58 @@ async function ft_initiateFileSend(fileId) {
             // Start of new chunk sending logic
             let currentChunk = 0;
             const totalChunks = fileDataHeaderBase.totalChunks;
-            const LOW_WATER_MARK = 1024 * 1024; // Example: 1MB, adjust as needed
-            const SEND_DELAY_MS = 50; // Example: 50ms delay for setTimeout fallback
+
+            const MCIF_MIN = 2;
+            const MCIF_MAX = 8;
+            const MCIF_INITIAL = 4;
+            const MCIF_ADJUST_SUCCESS_THRESHOLD = 3; // No. of full bursts before trying to increase
+            const MCIF_ADJUST_HWM_HIT_THRESHOLD = 2;   // No. of HWM hits before trying to decrease
+
+            let dynamic_mcif = MCIF_INITIAL;
+            let current_high_water_mark = CHUNK_SIZE * dynamic_mcif;
+
+            let successful_bursts_since_last_adjust = 0;
+            let hwm_hits_since_last_adjust = 0;
+            let mcif_at_burst_start = dynamic_mcif; // Store MCIF value used for the current burst
+
+            function adjustMcifParameters(burst_hit_hwm, burst_was_full_and_no_hwm) {
+                if (burst_hit_hwm) {
+                    hwm_hits_since_last_adjust++;
+                    successful_bursts_since_last_adjust = 0; // Reset success counter on any HWM hit
+                    if (hwm_hits_since_last_adjust >= MCIF_ADJUST_HWM_HIT_THRESHOLD) {
+                        if (dynamic_mcif > MCIF_MIN) {
+                            dynamic_mcif--;
+                            log(`FileTransfer Plugin: Dynamic MCIF decreased to ${dynamic_mcif}`);
+                        }
+                        hwm_hits_since_last_adjust = 0; // Reset after adjustment
+                    }
+                } else if (burst_was_full_and_no_hwm) {
+                    successful_bursts_since_last_adjust++;
+                    // Don't reset hwm_hits_since_last_adjust here, allow it to persist until an actual HWM hit.
+                    if (successful_bursts_since_last_adjust >= MCIF_ADJUST_SUCCESS_THRESHOLD) {
+                        if (dynamic_mcif < MCIF_MAX) {
+                            dynamic_mcif++;
+                            log(`FileTransfer Plugin: Dynamic MCIF increased to ${dynamic_mcif}`);
+                        }
+                        successful_bursts_since_last_adjust = 0; // Reset after adjustment
+                    }
+                }
+                // Update high water mark for the next burst operation
+                current_high_water_mark = CHUNK_SIZE * dynamic_mcif;
+            }
 
             async function sendNextChunk() {
+                mcif_at_burst_start = dynamic_mcif;
+                log(`FileTransfer Plugin: sendNextChunk called. currentChunk: ${currentChunk + 1}/${totalChunks}, bufferedAmount: ${dataChannel.bufferedAmount}, dynamic_mcif: ${dynamic_mcif}, mcif_at_burst_start: ${mcif_at_burst_start}`);
+
                 if (currentChunk >= totalChunks) {
-                    ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
-                    log(`FileTransfer Plugin: All chunks sent for ${file.name}`);
-                    // Clean up bufferedamountlow listener if it was attached
+                    // This case should ideally be caught after a burst or by the initial check.
+                    // If reached, it means sendNextChunk was called when all chunks were already processed.
+                    log(`FileTransfer Plugin: sendNextChunk called but all chunks already processed for ${file.name}.`);
+                    if (ft_pendingFileTransfers[fileId].status !== 'sent_all_chunks') {
+                         ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
+                         log(`FileTransfer Plugin: Corrected status to 'sent_all_chunks' for ${file.name}`);
+                    }
                     if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
                         dataChannel.onbufferedamountlow = null;
                     }
@@ -224,65 +268,97 @@ async function ft_initiateFileSend(fileId) {
                 }
 
                 if (typeof dataChannel === 'undefined' || !dataChannel || dataChannel.readyState !== 'open') {
-                    throw new Error("Data channel closed mid-transfer");
+                    log(`FileTransfer Plugin: Data channel closed mid-transfer for ${file.name}. Aborting.`);
+                    ft_pendingFileTransfers[fileId].status = 'error_sending_channel_closed';
+                    if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
+                        dataChannel.onbufferedamountlow = null;
+                    }
+                    if (typeof addMessageToChat === 'function') addMessageToChat(`--- Data channel closed while sending ${file.name}. Transfer aborted. ---`, "system");
+                    return;
                 }
 
-                const start = currentChunk * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const chunkBlob = file.slice(start, end);
-                const chunkArrayBuffer = await readBlobAsArrayBuffer(chunkBlob); // readBlobAsArrayBuffer from core
+                let chunksSentInBurst = 0;
+                while (currentChunk < totalChunks && chunksSentInBurst < mcif_at_burst_start) {
+                    if (dataChannel.bufferedAmount >= current_high_water_mark) {
+                        log(`FileTransfer Plugin: Buffer high for ${file.name} (at ${dataChannel.bufferedAmount} >= ${current_high_water_mark}). Waiting for bufferedamountlow.`);
+                        dataChannel.onbufferedamountlow = handleBufferedAmountLow;
+                        return;
+                    }
 
-                const chunkHeader = { fileId: fileId, chunkNum: currentChunk, chunkSize: chunkArrayBuffer.byteLength };
-                const encryptedChunkHeaderPayload = encrypt.encrypt(JSON.stringify(chunkHeader));
-                if (!encryptedChunkHeaderPayload) {
-                    throw new Error(`Error encrypting chunk header ${currentChunk}`);
+                    const start = currentChunk * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    const chunkBlob = file.slice(start, end);
+                    let chunkArrayBuffer;
+                    try {
+                        chunkArrayBuffer = await readBlobAsArrayBuffer(chunkBlob);
+                    } catch (error) {
+                        log(`FileTransfer Plugin: Error reading chunk ${currentChunk + 1} for ${file.name}: ${error}. Aborting.`);
+                        ft_pendingFileTransfers[fileId].status = 'error_reading_chunk';
+                        if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
+                            dataChannel.onbufferedamountlow = null;
+                        }
+                        if (typeof addMessageToChat === 'function') addMessageToChat(`--- Error reading file chunk ${currentChunk + 1} for ${file.name}. Transfer aborted. ---`, "system");
+                        return;
+                    }
+
+                    const chunkHeader = { fileId: fileId, chunkNum: currentChunk, chunkSize: chunkArrayBuffer.byteLength };
+                    const encryptedChunkHeaderPayload = encrypt.encrypt(JSON.stringify(chunkHeader));
+                    if (!encryptedChunkHeaderPayload) {
+                        log(`FileTransfer Plugin: Error encrypting chunk header ${currentChunk + 1} for ${file.name}. Aborting.`);
+                        ft_pendingFileTransfers[fileId].status = 'error_encrypting_chunk_header';
+                         if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
+                            dataChannel.onbufferedamountlow = null;
+                        }
+                        if (typeof addMessageToChat === 'function') addMessageToChat(`--- Error preparing chunk ${currentChunk + 1} for ${file.name}. Transfer aborted. ---`, "system");
+                        return;
+                    }
+
+                    sendDataChannelMessage({ type: "encrypted_control_message", subType: "file_chunk_header", payload: encryptedChunkHeaderPayload });
+                    dataChannel.send(chunkArrayBuffer);
+                    log(`FileTransfer Plugin: Sent chunk ${currentChunk + 1}/${totalChunks} for ${file.name}. Buffered amount: ${dataChannel.bufferedAmount}, MCIF at burst start: ${mcif_at_burst_start}`);
+                    if(ft_pendingFileTransfers[fileId]) ft_pendingFileTransfers[fileId].sentChunks = (ft_pendingFileTransfers[fileId].sentChunks || 0) + 1;
+
+                    currentChunk++;
+                    chunksSentInBurst++;
                 }
 
-                sendDataChannelMessage({ type: "encrypted_control_message", subType: "file_chunk_header", payload: encryptedChunkHeaderPayload });
-                dataChannel.send(chunkArrayBuffer); // Send binary data directly via dataChannel from core
-                log(`FileTransfer Plugin: Sent chunk ${currentChunk + 1}/${totalChunks} for ${file.name}. Buffered amount: ${dataChannel.bufferedAmount}`);
-                ft_pendingFileTransfers[fileId].sentChunks = (ft_pendingFileTransfers[fileId].sentChunks || 0) + 1;
-                currentChunk++;
+                let burst_hit_hwm = (chunksSentInBurst < mcif_at_burst_start && currentChunk < totalChunks);
+                let sent_all_planned_chunks_for_burst = (chunksSentInBurst === mcif_at_burst_start);
+                let full_successful_burst_for_increase = sent_all_planned_chunks_for_burst && !burst_hit_hwm;
 
-                // Check if bufferedamountlow event is supported and reliable
-                // For this example, we'll assume it's supported if the property exists.
-                // Reliability would need more complex feature detection or prior knowledge.
-                if (typeof dataChannel.onbufferedamountlow !== 'undefined' && dataChannel.bufferedAmount > LOW_WATER_MARK) {
-                    log(`FileTransfer Plugin: Buffer full for ${file.name}. Waiting for bufferedamountlow. Amount: ${dataChannel.bufferedAmount}`);
-                    dataChannel.onbufferedamountlow = handleBufferedAmountLow;
-                } else if (typeof dataChannel.onbufferedamountlow === 'undefined') {
-                    // Fallback to setTimeout if onbufferedamountlow is not supported
-                    log(`FileTransfer Plugin: bufferedamountlow not supported. Using setTimeout for ${file.name}.`);
-                    setTimeout(sendNextChunk, SEND_DELAY_MS);
-                } else {
-                    // If onbufferedamountlow is supported but buffer is not full, send next chunk immediately (or with a small delay)
-                    // This path can also be a fallback if bufferedamountlow doesn't fire reliably.
-                    // For simplicity, we'll use a small delay here too, or could call sendNextChunk() directly for faster sending.
-                    // Calling directly might lead to recursion depth issues for very fast channels/small chunks if not careful.
-                    // Using requestAnimationFrame or Promise.resolve().then() could be alternatives for immediate scheduling.
-                    // log(`FileTransfer Plugin: Buffer not full, or onbufferedamountlow not reliable. Scheduling next chunk with minimal delay for ${file.name}.`);
-                    // setTimeout(sendNextChunk, 0); // Or Promise.resolve().then(sendNextChunk);
-                    // For a more robust approach, we can just proceed if buffer is low, otherwise wait.
-                    // If bufferedAmount is low enough, proceed, else set up listener or timeout.
-                    // This logic is already covered by the (dataChannel.bufferedAmount > LOW_WATER_MARK) check above.
-                    // So if we reach here, it means the buffer is NOT high, so we can send the next one.
-                    // To prevent potential stack overflow with synchronous recursive calls:
+                if (currentChunk < totalChunks || burst_hit_hwm) {
+                     adjustMcifParameters(burst_hit_hwm, full_successful_burst_for_increase);
+                }
+
+                if (currentChunk < totalChunks) {
+                    log(`FileTransfer Plugin: Burst of ${chunksSentInBurst} chunks sent for ${file.name}. Scheduling next call to sendNextChunk. Next chunk: ${currentChunk + 1}, Buffered: ${dataChannel.bufferedAmount}, Next MCIF: ${dynamic_mcif}`);
                     Promise.resolve().then(sendNextChunk);
+                } else {
+                    ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
+                    log(`FileTransfer Plugin: All ${totalChunks} chunks sent for ${file.name} after final burst of ${chunksSentInBurst}. Final MCIF: ${dynamic_mcif}`);
+                    if (dataChannel && dataChannel.onbufferedamountlow === handleBufferedAmountLow) {
+                        dataChannel.onbufferedamountlow = null;
+                    }
                 }
             }
 
             function handleBufferedAmountLow() {
-                log(`FileTransfer Plugin: bufferedamountlow event fired for ${file.name}. Resuming send. Buffered amount: ${dataChannel.bufferedAmount}`);
-                // It's good practice to nullify the handler after it's been called once,
-                // especially if we re-evaluate whether to use it for the next chunk.
-                // However, if we always want to rely on it when the buffer gets full,
-                // we might re-assign it. For this pattern, let's clear and re-evaluate.
-                if (dataChannel) { // Check if dataChannel still exists
+                log(`FileTransfer Plugin: bufferedamountlow event fired for ${file.name}. Resuming send. Buffered amount: ${dataChannel.bufferedAmount}, Current MCIF: ${dynamic_mcif}`);
+                if (dataChannel) {
                     dataChannel.onbufferedamountlow = null;
                 }
-                sendNextChunk();
+                // Ensure we still have chunks to send and the channel is open
+                if (currentChunk < totalChunks && dataChannel && dataChannel.readyState === 'open') {
+                    adjustMcifParameters(true, false);
+                    sendNextChunk();
+                } else {
+                    log(`FileTransfer Plugin: bufferedamountlow fired but conditions not met to resume for ${file.name}. Current chunk: ${currentChunk + 1}/${totalChunks}, Channel state: ${dataChannel ? dataChannel.readyState : 'N/A'}`);
+                    if (currentChunk >= totalChunks && ft_pendingFileTransfers[fileId] && ft_pendingFileTransfers[fileId].status !== 'sent_all_chunks') {
+                         ft_pendingFileTransfers[fileId].status = 'sent_all_chunks';
+                         log(`FileTransfer Plugin: Marked as all chunks sent for ${file.name} from bufferedamountlow handler (post-loop).`);
+                    }
+                }
             }
-
             // Initiate the sending process
             sendNextChunk();
 
